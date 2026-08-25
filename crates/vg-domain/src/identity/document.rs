@@ -44,7 +44,7 @@ pub struct VerificationMethod {
     pub id: String,
     /// 密钥算法类型。
     pub key_type: KeyType,
-    /// 公钥摘要。
+    /// 公钥摘要。编码口径由 [`VerificationMethod::pubkey_digest`] 唯一定义。
     pub public_key: Hash32,
     /// 控制该方法的主体 DID。
     pub controller: Did,
@@ -67,6 +67,16 @@ impl VerificationMethod {
             controller,
             revoked: false,
         }
+    }
+
+    /// 公钥摘要的唯一规范编码：`keccak256(secp256k1 压缩公钥 33 字节 sec1)`。
+    ///
+    /// 这是**全系统唯一定义**：Task 10（vg-infra-crypto keypair）与
+    /// Task 23（vg-api VG-SIG 验签）都必须经由本函数生成/比对
+    /// [`VerificationMethod::public_key`]，禁止各自引入其他编码，
+    /// 否则验签将永远失败。
+    pub fn pubkey_digest(compressed_sec1: &[u8]) -> Hash32 {
+        Hash32::keccak(compressed_sec1)
     }
 }
 
@@ -261,6 +271,44 @@ mod tests {
         assert_eq!(found.id, "active-key");
         assert_eq!(found.public_key, Hash32::keccak(b"current"));
         assert!(!found.revoked);
+    }
+
+    // ---- pubkey_digest：公钥摘要的唯一规范编码 ----
+
+    #[test]
+    fn pubkey_digest_is_deterministic_and_matches_keccak() {
+        // 标准 secp256k1 压缩公钥形态：0x02/0x03 前缀 + 32 字节 X 坐标
+        let sec1 = [0x02u8; 33];
+
+        let first = VerificationMethod::pubkey_digest(&sec1);
+        let second = VerificationMethod::pubkey_digest(&sec1);
+        assert_eq!(first, second, "同一输入必须产出确定性的摘要");
+
+        // 规范编码即 keccak256(压缩 sec1)，与 Hash32::keccak 完全一致
+        assert_eq!(first, Hash32::keccak(&sec1));
+        assert_eq!(first.as_hex().len(), 64);
+    }
+
+    #[test]
+    fn pubkey_digest_roundtrips_33_byte_compressed_key() {
+        // 压缩公钥 = 1 字节前缀（0x02/0x03）+ 32 字节 X 坐标
+        let mut pk = vec![0x03u8];
+        pk.extend_from_slice(&[0x7Fu8; 32]);
+        assert_eq!(pk.len(), 33);
+
+        let digest = VerificationMethod::pubkey_digest(&pk);
+        // 摘要经 hex 往返后保持一致
+        let back = Hash32::from_hex(&digest.as_hex()).expect("hex 应可解析");
+        assert_eq!(back, digest);
+
+        // 输入任一字节变化 → 摘要必须不同
+        let mut other = pk.clone();
+        other[0] = 0x02;
+        assert_ne!(
+            digest,
+            VerificationMethod::pubkey_digest(&other),
+            "前缀不同则摘要必须不同"
+        );
     }
 
     // ---- serde ----

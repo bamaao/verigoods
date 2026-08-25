@@ -4,7 +4,7 @@
 //! [`assert_allowed`] 在执行动作前校验能力是否存在且未过期。
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::shared::{Did, DomainError};
 
@@ -60,8 +60,10 @@ impl std::fmt::Display for Action {
 
 /// 一条能力委托：`granted_by` 授权 `agent` 执行 `action`，可选过期时间。
 ///
-/// 字段私有：只能通过 [`Capability::new`] 构造，保证授权方约束不被绕过。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// 字段私有：构造与反序列化都必须经由 [`Capability::new`]，
+/// "授权方不得是智能体"约束因此无法被任何输入路径绕过
+/// （与 [`crate::shared::Did`] 的手写校验型反序列化同一先例）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Capability {
     /// 被授权执行操作的智能体 DID。
     agent: Did,
@@ -125,6 +127,29 @@ impl Capability {
             Some(expires_at) => now < expires_at,
             None => true,
         }
+    }
+}
+
+/// 反序列化中间载体：仅用于捕获原始字段，随后强制走 [`Capability::new`] 校验。
+#[derive(Deserialize)]
+struct RawCapability {
+    agent: Did,
+    action: Action,
+    granted_by: Did,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+impl<'de> Deserialize<'de> for Capability {
+    /// 手写实现：先还原字段，再委托 [`Capability::new`] 做授权方校验，
+    /// 使 `"granted_by": "did:vg:agent:..."` 这类非法输入报 serde 数据错误，
+    /// 而非绕过领域规则静默构造。
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawCapability::deserialize(deserializer)?;
+        Capability::new(raw.agent, raw.action, raw.granted_by, raw.expires_at)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -305,6 +330,39 @@ mod tests {
 
         let back: Capability = serde_json::from_str(&json).expect("反序列化应成功");
         assert_eq!(back, cap);
+    }
+
+    #[test]
+    fn deserialization_rejects_agent_grantor_json() {
+        // 回归测试：派生 Deserialize 会直接构造私有字段、绕过 Capability::new
+        // 的授权方校验，使智能体转授的 JSON 静默通过。反序列化必须强制走
+        // new()，非法 granted_by 报 serde 数据错误。
+        let json = format!(
+            r#"{{"agent":"{}","action":"read_product","granted_by":"did:vg:agent:rogue-agent","expires_at":null}}"#,
+            agent()
+        );
+        let err = serde_json::from_str::<Capability>(&json)
+            .expect_err("granted_by 为智能体的 JSON 必须被拒绝");
+        assert!(err.is_data(), "应为 serde 数据错误：{err}");
+        assert!(
+            err.to_string().contains("授权方"),
+            "错误应携带 new() 的中文校验原因：{err}"
+        );
+    }
+
+    #[test]
+    fn deserialization_of_valid_capability_succeeds() {
+        // 不依赖序列化输出的独立合法用例：字段齐全且 granted_by 非 agent
+        let json = format!(
+            r#"{{"agent":"{}","action":"create_batch","granted_by":"{}","expires_at":null}}"#,
+            agent(),
+            enterprise()
+        );
+        let cap: Capability = serde_json::from_str(&json).expect("合法 JSON 应可反序列化");
+        assert_eq!(cap.agent(), &agent());
+        assert_eq!(cap.action(), &Action::CreateBatch);
+        assert_eq!(cap.granted_by(), &enterprise());
+        assert_eq!(cap.expires_at(), None);
     }
 
     #[test]
