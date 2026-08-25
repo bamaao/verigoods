@@ -12,13 +12,14 @@
 //! - [`shared`]：跨限界上下文共享的值对象与领域错误；
 //! - [`identity`]：身份：DID 文档、能力委托；
 //! - [`credential`]：凭证：VC 聚合、状态机与上链锚定端口；
+//! - [`lifecycle`]：生命周期：商品 12 态状态机、事件与端口；
 
 pub mod credential;
 pub mod identity;
+pub mod lifecycle;
 pub mod shared;
 
 // ---- 占位：以下上下文模块由后续任务添加 ----
-// pub mod lifecycle;   // 生命周期：批次状态机、事件
 // pub mod commodity;   // 商品：Product/Batch/Asset/Lineage
 // pub mod ownership;   // 所有权：状态机与转移
 // pub mod policy;      // 策略：领域策略与 ABAC
