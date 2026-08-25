@@ -23,6 +23,11 @@
 //! 全局强制路径（监管驱动）：**任何非终态**均可 `→ Recalled`、`→ Destroyed`
 //! （如问题批次无论处于哪个环节都可被强制召回，进而销毁）。
 //! 终态：`Expired` 与 `Destroyed` 不可迁出；自迁移（from == to）一律禁止。
+//!
+//! `Recalled` 非终态，出路有二：
+//! - `Recalled → Available`：**恢复路径**。应用层（Task 22 合规重算）必须在
+//!   执行前校验全部必需凭证有效且 policy 允许；领域层只保证转换合法性；
+//! - `Recalled → Destroyed`：监管强制销毁（全局强制路径之一）。
 
 use serde::{Deserialize, Serialize};
 
@@ -156,6 +161,8 @@ pub const ALLOWED_TRANSITIONS: &[(LifecycleState, LifecycleState)] = &[
     (LifecycleState::Sold, LifecycleState::Owned),
     (LifecycleState::Owned, LifecycleState::Resold),
     (LifecycleState::Owned, LifecycleState::Recalled),
+    // 恢复路径：应用层（Task 22 合规重算）必须在执行前校验全部必需凭证有效且 policy 允许，领域层只保证转换合法性
+    (LifecycleState::Recalled, LifecycleState::Available),
     // ---- 全局强制路径补充（监管强制：任何非终态 → Recalled / → Destroyed；
     //      已在基础矩阵中的不重复收录，自迁移一律排除）----
     (LifecycleState::Created, LifecycleState::Recalled), // 监管强制
@@ -233,8 +240,9 @@ mod tests {
             Owned => &[Resold, Recalled, Destroyed],
             // 转售中仍属非终态：仅剩监管强制两条路
             Resold => &[Recalled, Destroyed],
-            // 已召回非终态：仅剩监管销毁一条路（自迁移禁止）
-            Recalled => &[Destroyed],
+            // 已召回非终态：可经恢复路径回到可售（应用层合规门控），
+            // 或被监管强制销毁（自迁移禁止）
+            Recalled => &[Available, Destroyed],
             Expired => &[],
             Destroyed => &[],
         }
@@ -306,8 +314,8 @@ mod tests {
         }
         assert_eq!(ALLOWED_TRANSITIONS.len(), total_expected);
         assert_eq!(
-            total_expected, 34,
-            "应为 19 条基础矩阵边 + 15 条全局强制补充边"
+            total_expected, 35,
+            "应为 20 条基础矩阵边 + 15 条全局强制补充边"
         );
     }
 
@@ -381,6 +389,35 @@ mod tests {
             (LifecycleState::Inspected, LifecycleState::Recalled),
         ] {
             assert_transition(from, to).expect("监管强制路径应放行");
+        }
+    }
+
+    // ---- 3.5 恢复路径 ----
+
+    #[test]
+    fn recalled_to_available_allowed_but_other_targets_still_rejected() {
+        // 恢复路径放行：领域层只保证转换合法性；
+        // 凭证有效性与 policy 允许由应用层（Task 22 合规重算）在执行前校验
+        assert!(
+            can_transition(LifecycleState::Recalled, LifecycleState::Available),
+            "Recalled→Available 恢复路径应被允许"
+        );
+        assert_transition(LifecycleState::Recalled, LifecycleState::Available)
+            .expect("Recalled→Available 恢复路径应放行");
+
+        // Recalled 的其余目标仍拒绝（仅 Destroyed 监管强制除外，自迁移禁止）
+        for to in LifecycleState::ALL {
+            if to == LifecycleState::Available || to == LifecycleState::Destroyed {
+                continue;
+            }
+            assert!(
+                !can_transition(LifecycleState::Recalled, to),
+                "Recalled→{to:?} 应非法"
+            );
+            assert!(
+                assert_transition(LifecycleState::Recalled, to).is_err(),
+                "Recalled→{to:?} 不应放行"
+            );
         }
     }
 
