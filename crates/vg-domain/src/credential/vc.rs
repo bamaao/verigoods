@@ -144,13 +144,17 @@ impl VerifiableCredential {
     /// 计算**规范化 JSON** 的 keccak256 摘要（不含 status 与 credential_hash）。
     ///
     /// 规范化策略（两种候选中的选择说明）：构造一个**不含 hash/status 的规范视图**
-    /// 并对 claims 做**递归键排序**，而非仅用 BTreeMap 重排 claims：
+    /// （envelope），随后将**包括外层 envelope 在内的整棵 JSON 树**交给
+    /// [`canonicalize`] 做递归键排序：
     /// 1. 排除自身派生字段，避免"哈希依赖自身"的循环定义，也让状态迁移无需重算；
-    /// 2. 仅重排顶层不够——嵌套对象同样会因插入顺序不同产生不同字节串，
-    ///    因此递归排序所有层级的对象键；数组保序（有序列表语义不应被破坏）；
-    /// 3. serde_json 未开启 preserve_order 时 Map 本身有序，但显式递归重排使哈希
-    ///    不依赖该 feature 开关，跨 crate 特性统一时依然稳定。
+    /// 2. 排序必须覆盖全部层级与外层 envelope——serde_json 默认 Map=BTreeMap
+    ///    （字典序），但一旦工作区内任意 crate 启用 `preserve_order`，
+    ///    Map 变为 IndexMap（插入序），未规范化的层会随 feature 开关漂移出
+    ///    不同哈希；全量规范化保证同一逻辑内容在任何 serde_json feature
+    ///    组合下字节串唯一；
+    /// 3. 数组保序（有序列表语义不应被破坏）。
     ///
+    /// 契约由 golden vector 测试固化（`hash_golden_vector_locks_canonical_format`）。
     /// 由此保证：同字段、不同插入顺序的 claims 必然产出相同哈希。
     pub fn compute_hash(&self) -> Hash32 {
         let view = serde_json::json!({
@@ -158,11 +162,13 @@ impl VerifiableCredential {
             "issuer": self.issuer,
             "subject": self.subject,
             "ctype": self.ctype,
-            "claims": canonicalize(&self.claims),
+            "claims": self.claims,
             "issued_at": self.issued_at,
             "expires_at": self.expires_at,
         });
-        Hash32::keccak(view.to_string().as_bytes())
+        // 整棵树（含外层 envelope 键序）递归规范化，杜绝 preserve_order 漂移
+        let canonical = canonicalize(&view);
+        Hash32::keccak(canonical.to_string().as_bytes())
     }
 
     /// 状态迁移（仅签发方可执行）。
@@ -268,6 +274,11 @@ impl<'de> Deserialize<'de> for VerifiableCredential {
     /// 手写实现（与 [`crate::identity::capability::Capability`] 同一先例）：
     /// 反序列化不得绕过领域不变式——claims 必须为 object，且持久化内容与
     /// credential_hash 一致（防存储层篡改/截断），违规报 serde 数据错误。
+    ///
+    /// 完整性校验边界：`status` **不参与**哈希，故不在校验范围内——改写
+    /// status 字段的载荷仍可通过反序列化。状态的真实性不由内容哈希保障，
+    /// 而由链上 [`super::ports::CredentialAnchorPort::anchor_status`] 事件
+    /// 与数据库写权限控制；消费方核验状态时应以链上锚定记录为准。
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -485,6 +496,49 @@ mod tests {
             .expect("Valid→Suspended 应成功");
         // status 不参与哈希：状态迁移后内容承诺保持不变
         assert_eq!(vc.compute_hash(), before);
+    }
+
+    /// Golden vector：固化"固定输入 → 固定规范化字节串 → 固定 hex 输出"的
+    /// 哈希格式契约。改动哈希算法、字段集合或序列化格式之前必须三思——
+    /// 该值一旦落库/上链即不可变，任何漂移都会导致历史凭证核验失败。
+    #[test]
+    fn hash_golden_vector_locks_canonical_format() {
+        let vc = VerifiableCredential::new(
+            CredentialId::new("vc-golden"),
+            Did::parse("did:vg:user:ent-900").unwrap(),
+            Did::parse("did:vg:batch:b-9001").unwrap(),
+            CredentialType::FoodSafetyInspection,
+            serde_json::json!({
+                "license_no": "LIC-2026-0001",
+                "authority": "市场监督管理局"
+            }),
+            fixed_time(),
+            Some(fixed_time() + chrono::Duration::days(365)),
+        )
+        .unwrap();
+
+        // 规范化字节串契约：外层 envelope 与 claims 全部按键字典序排列，
+        // 不含 status / credential_hash；非 ASCII 字符按 UTF-8 原样输出不转义。
+        const CANONICAL_JSON: &str = concat!(
+            r#"{"claims":{"authority":"市场监督管理局","license_no":"LIC-2026-0001"},"#,
+            r#""ctype":"food_safety_inspection","#,
+            r#""expires_at":"2027-01-01T00:00:00Z","#,
+            r#""id":"vc-golden","#,
+            r#""issued_at":"2026-01-01T00:00:00Z","#,
+            r#""issuer":"did:vg:user:ent-900","#,
+            r#""subject":"did:vg:batch:b-9001"}"#
+        );
+        assert_eq!(
+            vc.compute_hash(),
+            Hash32::keccak(CANONICAL_JSON.as_bytes()),
+            "哈希必须等于 keccak256(该规范化 JSON 字节串)"
+        );
+        // 固定 hex 输出（golden 值）
+        assert_eq!(
+            vc.compute_hash().as_hex(),
+            "7415289dcf4f0213069125c9fc2c95b977138ed6d2623a4e6cd97d2eb2492557",
+            "golden hex 漂移：哈希算法或序列化格式被改动"
+        );
     }
 
     // ---- 3. transition 合法迁移 ----
@@ -818,5 +872,48 @@ mod tests {
         let mut bad_status: serde_json::Value = serde_json::from_str(&json).unwrap();
         bad_status["status"] = serde_json::json!("frozen");
         assert!(serde_json::from_value::<VerifiableCredential>(bad_status).is_err());
+    }
+
+    /// 固化已知边界（M-1）：status 不参与哈希，改写 status 字段的载荷
+    /// 仍可通过反序列化。这是文档化契约而非缺陷——状态真实性由链上
+    /// anchor_status 事件与 DB 写权限保障，内容哈希只承诺业务字段。
+    #[test]
+    fn deserialization_ignores_status_field_tampering_by_design() {
+        let mut vc = sample_vc();
+        vc.transition(CredStatus::Revoked, &issuer(), fixed_time())
+            .expect("Valid→Revoked 应成功");
+        let json = serde_json::to_string(&vc).unwrap();
+
+        // 只改 status（revoked → valid），其余字段与哈希原样保留
+        let mut tampered_status: serde_json::Value = serde_json::from_str(&json).unwrap();
+        tampered_status["status"] = serde_json::json!("valid");
+        let back: VerifiableCredential = serde_json::from_value(tampered_status)
+            .expect("status 不参与完整性校验，应可通过反序列化");
+        assert_eq!(back.status, CredStatus::Valid);
+        assert_ne!(back.status, vc.status, "被篡改的状态不应等于原始状态");
+        // 业务字段承诺不受影响：claims/哈希与原文一致
+        assert_eq!(back.claims, vc.claims);
+        assert_eq!(back.credential_hash, vc.credential_hash);
+    }
+
+    /// Suspended 状态的凭证 JSON 往返无损（非 Valid 状态同样可持久化回读）。
+    #[test]
+    fn suspended_vc_json_roundtrip() {
+        let mut vc = sample_vc();
+        vc.transition(CredStatus::Suspended, &issuer(), fixed_time())
+            .expect("Valid→Suspended 应成功");
+
+        let text = serde_json::to_string(&vc).expect("序列化应成功");
+        assert!(
+            text.contains("\"status\":\"suspended\""),
+            "暂停态应为小写蛇形：{text}"
+        );
+
+        let back: VerifiableCredential = serde_json::from_str(&text).expect("roundtrip 应成功");
+        assert_eq!(back, vc);
+        assert_eq!(back.status, CredStatus::Suspended);
+        // 暂停态不生效，但内容承诺保持不变
+        assert!(!back.is_effective(fixed_time()));
+        assert_eq!(back.credential_hash, vc.credential_hash);
     }
 }
