@@ -161,9 +161,10 @@ commit `feat(domain): VC 聚合与状态机`。
 **Files:** `crates/vg-domain/src/lifecycle/{mod.rs,state.rs,event.rs}`
 
 `enum LifecycleState { Created, Produced, Inspected, InTransit, InWarehouse, Available, Sold, Owned, Resold, Recalled, Expired, Destroyed }`（12 态，serde 小写蛇形）。
+**修订（用户需求）：新增第 13 态 `Delisted`（已下架）**——企业可对可售商品执行下架/重新上架。
 
 **转换矩阵**（`ALLOWED: &[(LifecycleState, LifecycleState)]`，文档 §16）：
-Created→Produced；Produced→Inspected|InTransit|InWarehouse|Destroyed；Inspected→InTransit|InWarehouse|Available|Recalled；InTransit→InWarehouse|Available；InWarehouse→Available|InTransit；Available→Sold|Recalled|Expired；Sold→Owned；Owned→Resold|Recalled；任意→Recalled|Destroyed（监管强制）；Expired/Destroyed 终态。
+Created→Produced；Produced→Inspected|InTransit|InWarehouse|Destroyed；Inspected→InTransit|InWarehouse|Available|Recalled；InTransit→InWarehouse|Available；InWarehouse→Available|InTransit；Available→Sold|Recalled|Expired|**Delisted**；**Delisted→Available（重新上架）**；Sold→Owned；Owned→Resold|Recalled；**Recalled→Available（恢复路径，应用层强制校验全部必需凭证有效且 policy 允许后方可执行，见产品文档 §59 Policy Engine 重算语义）**；任意→Recalled|Destroyed（监管强制）；Expired/Destroyed 终态。
 
 `fn can_transition(from,to)->bool`; `struct LifecycleEvent{ id, subject_id:SubjectRef /*Batch|Asset 双类型*/, from,to, reason:Option<String>, intent_id:IntentId, proof_id:Option<ProofId>, policy_version:Option<u64>, at }`。
 测试：矩阵全覆盖（合法通过/非法拒绝）、终态锁定。

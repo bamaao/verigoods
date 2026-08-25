@@ -12,7 +12,7 @@
 //! - [`shared`]：跨限界上下文共享的值对象与领域错误；
 //! - [`identity`]：身份：DID 文档、能力委托；
 //! - [`credential`]：凭证：VC 聚合、状态机与上链锚定端口；
-//! - [`lifecycle`]：生命周期：商品 12 态状态机、事件与端口；
+//! - [`lifecycle`]：生命周期：商品 13 态状态机（含上下架）、事件与端口；
 
 pub mod credential;
 pub mod identity;

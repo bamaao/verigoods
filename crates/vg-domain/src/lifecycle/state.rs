@@ -1,6 +1,6 @@
 //! 商品生命周期状态机。
 //!
-//! [`LifecycleState`] 定义批次/单品从建档到退出市场的 **12 个状态**；
+//! [`LifecycleState`] 定义批次/单品从建档到退出市场的 **13 个状态**；
 //! [`ALLOWED_TRANSITIONS`] 物化全部合法迁移边（基础业务矩阵 + 监管强制路径），
 //! [`can_transition`] / [`assert_transition`] 是唯一的迁移裁决入口——上层服务与
 //! [`super::event::LifecycleEvent`] 的构造都必须经过它。
@@ -15,7 +15,8 @@
 //! Inspected   → InTransit | InWarehouse | Available | Recalled
 //! InTransit   → InWarehouse | Available
 //! InWarehouse → Available | InTransit
-//! Available   → Sold | Recalled | Expired
+//! Available   → Sold | Recalled | Expired | Delisted
+//! Delisted    → Available
 //! Sold        → Owned
 //! Owned       → Resold | Recalled
 //! ```
@@ -28,12 +29,16 @@
 //! - `Recalled → Available`：**恢复路径**。应用层（Task 22 合规重算）必须在
 //!   执行前校验全部必需凭证有效且 policy 允许；领域层只保证转换合法性；
 //! - `Recalled → Destroyed`：监管强制销毁（全局强制路径之一）。
+//!
+//! `Delisted` 同样非终态：`Available ↔ Delisted` 是平台运营的 **下架 /
+//! 重新上架** 开关——仅影响可售可见性，不改变链上归属与追溯链；
+//! 下架态仍受监管强制路径约束（`→ Recalled` / `→ Destroyed`）。
 
 use serde::{Deserialize, Serialize};
 
 use crate::shared::DomainError;
 
-/// 商品（批次/单品）的生命周期状态（12 态全量）。
+/// 商品（批次/单品）的生命周期状态（13 态全量）。
 ///
 /// serde 序列化为小写蛇形：`"created"` / `"in_transit"` 等；
 /// 中文名见 [`LifecycleState::zh_name`]。
@@ -52,6 +57,8 @@ pub enum LifecycleState {
     InWarehouse,
     /// 可售。
     Available,
+    /// 已下架（平台可见性关闭，可重新上架；非终态）。
+    Delisted,
     /// 已售出。
     Sold,
     /// 已持有（买家收货持有中）。
@@ -68,13 +75,14 @@ pub enum LifecycleState {
 
 impl LifecycleState {
     /// 全部状态，按声明顺序排列（供穷举校验与遍历使用）。
-    pub const ALL: [LifecycleState; 12] = [
+    pub const ALL: [LifecycleState; 13] = [
         Self::Created,
         Self::Produced,
         Self::Inspected,
         Self::InTransit,
         Self::InWarehouse,
         Self::Available,
+        Self::Delisted,
         Self::Sold,
         Self::Owned,
         Self::Resold,
@@ -92,6 +100,7 @@ impl LifecycleState {
             LifecycleState::InTransit => "in_transit",
             LifecycleState::InWarehouse => "in_warehouse",
             LifecycleState::Available => "available",
+            LifecycleState::Delisted => "delisted",
             LifecycleState::Sold => "sold",
             LifecycleState::Owned => "owned",
             LifecycleState::Resold => "resold",
@@ -110,6 +119,7 @@ impl LifecycleState {
             LifecycleState::InTransit => "运输中",
             LifecycleState::InWarehouse => "在库",
             LifecycleState::Available => "可售",
+            LifecycleState::Delisted => "已下架",
             LifecycleState::Sold => "已售出",
             LifecycleState::Owned => "已持有",
             LifecycleState::Resold => "转售中",
@@ -158,6 +168,10 @@ pub const ALLOWED_TRANSITIONS: &[(LifecycleState, LifecycleState)] = &[
     (LifecycleState::Available, LifecycleState::Sold),
     (LifecycleState::Available, LifecycleState::Recalled),
     (LifecycleState::Available, LifecycleState::Expired),
+    // 下架：平台将商品从可售场景移除（运营动作，不改变链上归属与追溯）
+    (LifecycleState::Available, LifecycleState::Delisted),
+    // 重新上架：恢复可售
+    (LifecycleState::Delisted, LifecycleState::Available),
     (LifecycleState::Sold, LifecycleState::Owned),
     (LifecycleState::Owned, LifecycleState::Resold),
     (LifecycleState::Owned, LifecycleState::Recalled),
@@ -180,6 +194,8 @@ pub const ALLOWED_TRANSITIONS: &[(LifecycleState, LifecycleState)] = &[
     (LifecycleState::Resold, LifecycleState::Recalled),  // 监管强制
     (LifecycleState::Resold, LifecycleState::Destroyed), // 监管强制
     (LifecycleState::Recalled, LifecycleState::Destroyed), // 监管强制
+    (LifecycleState::Delisted, LifecycleState::Recalled), // 监管强制
+    (LifecycleState::Delisted, LifecycleState::Destroyed), // 监管强制
 ];
 
 /// 判断 `from → to` 是否为合法迁移。
@@ -209,14 +225,15 @@ pub fn assert_transition(from: LifecycleState, to: LifecycleState) -> Result<(),
 mod tests {
     use super::*;
 
-    /// 全部 12 态的期望三元组：(状态, serde 小写蛇形名, 中文名)。
-    const EXPECTED: [(LifecycleState, &str, &str); 12] = [
+    /// 全部 13 态的期望三元组：(状态, serde 小写蛇形名, 中文名)。
+    const EXPECTED: [(LifecycleState, &str, &str); 13] = [
         (LifecycleState::Created, "created", "创建"),
         (LifecycleState::Produced, "produced", "已生产"),
         (LifecycleState::Inspected, "inspected", "已检验"),
         (LifecycleState::InTransit, "in_transit", "运输中"),
         (LifecycleState::InWarehouse, "in_warehouse", "在库"),
         (LifecycleState::Available, "available", "可售"),
+        (LifecycleState::Delisted, "delisted", "已下架"),
         (LifecycleState::Sold, "sold", "已售出"),
         (LifecycleState::Owned, "owned", "已持有"),
         (LifecycleState::Resold, "resold", "转售中"),
@@ -235,7 +252,10 @@ mod tests {
             Inspected => &[InTransit, InWarehouse, Available, Recalled, Destroyed],
             InTransit => &[InWarehouse, Available, Recalled, Destroyed],
             InWarehouse => &[Available, InTransit, Recalled, Destroyed],
-            Available => &[Sold, Recalled, Expired, Destroyed],
+            // 可售：可售出/被召回/过期，亦可下架（平台运营开关）
+            Available => &[Sold, Recalled, Expired, Destroyed, Delisted],
+            // 已下架：仅可重新上架，或被监管强制（自迁移禁止）
+            Delisted => &[Available, Recalled, Destroyed],
             Sold => &[Owned, Recalled, Destroyed],
             Owned => &[Resold, Recalled, Destroyed],
             // 转售中仍属非终态：仅剩监管强制两条路
@@ -248,10 +268,10 @@ mod tests {
         }
     }
 
-    // ---- 1. 144 组合穷举 ----
+    // ---- 1. 169 组合穷举 ----
 
     #[test]
-    fn exhaustive_144_combinations_match_expected_matrix() {
+    fn exhaustive_169_combinations_match_expected_matrix() {
         let mut checked = 0usize;
         for from in LifecycleState::ALL {
             for to in LifecycleState::ALL {
@@ -283,7 +303,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checked, 144, "必须穷举 12×12 组合");
+        assert_eq!(checked, 169, "必须穷举 13×13 组合");
     }
 
     /// 边表常量本身必须与期望集合**恰好相等**：不多、不少、不重复。
@@ -314,8 +334,8 @@ mod tests {
         }
         assert_eq!(ALLOWED_TRANSITIONS.len(), total_expected);
         assert_eq!(
-            total_expected, 35,
-            "应为 20 条基础矩阵边 + 15 条全局强制补充边"
+            total_expected, 39,
+            "应为 22 条基础矩阵边 + 17 条全局强制补充边"
         );
     }
 
@@ -421,6 +441,62 @@ mod tests {
         }
     }
 
+    // ---- 3.6 上下架 ----
+
+    #[test]
+    fn available_to_delisted_and_back() {
+        // 下架：平台运营开关，不改变链上归属与追溯
+        assert!(
+            can_transition(LifecycleState::Available, LifecycleState::Delisted),
+            "Available→Delisted 下架应被允许"
+        );
+        assert_transition(LifecycleState::Available, LifecycleState::Delisted)
+            .expect("Available→Delisted 下架应放行");
+        // 重新上架
+        assert!(
+            can_transition(LifecycleState::Delisted, LifecycleState::Available),
+            "Delisted→Available 重新上架应被允许"
+        );
+        assert_transition(LifecycleState::Delisted, LifecycleState::Available)
+            .expect("Delisted→Available 重新上架应放行");
+        // 往返后仍可正常售出（状态机无副作用）
+        assert!(can_transition(
+            LifecycleState::Available,
+            LifecycleState::Sold
+        ));
+
+        // 下架态不可直达业务路径（售出/入库/过期等均非法）
+        for to in [
+            LifecycleState::Sold,
+            LifecycleState::InWarehouse,
+            LifecycleState::Expired,
+            LifecycleState::Produced,
+        ] {
+            assert!(
+                !can_transition(LifecycleState::Delisted, to),
+                "Delisted→{to:?} 应非法"
+            );
+        }
+    }
+
+    #[test]
+    fn delisted_subject_to_regulatory_forced_paths() {
+        // Delisted 为非终态，自然适用两条全局监管强制路径
+        for forced_to in [LifecycleState::Recalled, LifecycleState::Destroyed] {
+            assert!(
+                can_transition(LifecycleState::Delisted, forced_to),
+                "Delisted 应可被监管强制 {forced_to:?}"
+            );
+            assert_transition(LifecycleState::Delisted, forced_to)
+                .unwrap_or_else(|err| panic!("Delisted→{forced_to:?}：{err}"));
+        }
+        // 数据层面：监管补充段包含 Delisted 的两条强制边
+        assert!(ALLOWED_TRANSITIONS.contains(&(LifecycleState::Delisted, LifecycleState::Recalled)));
+        assert!(
+            ALLOWED_TRANSITIONS.contains(&(LifecycleState::Delisted, LifecycleState::Destroyed))
+        );
+    }
+
     // ---- 4. 基础矩阵代表路径 ----
 
     #[test]
@@ -453,10 +529,10 @@ mod tests {
     // ---- 5. serde / as_str / zh_name ----
 
     #[test]
-    fn serde_snake_case_as_str_and_zh_name_cover_all_12_states() {
+    fn serde_snake_case_as_str_and_zh_name_cover_all_13_states() {
         // EXPECTED 与 LifecycleState::ALL 互相覆盖（防漏防多）
-        assert_eq!(EXPECTED.len(), 12);
-        assert_eq!(LifecycleState::ALL.len(), 12);
+        assert_eq!(EXPECTED.len(), 13);
+        assert_eq!(LifecycleState::ALL.len(), 13);
         for (state, _, _) in EXPECTED {
             assert!(LifecycleState::ALL.contains(&state), "{state:?} 未纳入 ALL");
         }
@@ -483,7 +559,7 @@ mod tests {
         assert!(zh_names.iter().all(|name| !name.is_empty()));
         zh_names.sort_unstable();
         zh_names.dedup();
-        assert_eq!(zh_names.len(), 12, "中文名应互不相同");
+        assert_eq!(zh_names.len(), 13, "中文名应互不相同");
 
         // 未知字符串与大小写变体一律拒绝
         assert!(serde_json::from_str::<LifecycleState>("\"lost\"").is_err());
