@@ -4,14 +4,17 @@
 //! - 智能体：`did:vg:agent:9f2c...`
 //! - 其他主体：`did:vg:user:<id>`、`did:vg:batch:<id>` 等
 
-use std::fmt;
+use std::{fmt, str::FromStr};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::errors::DomainError;
 
 /// VeriGoods 去中心化标识符值对象，形如 `did:vg:<method-specific-id>`。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// 反序列化为手写实现并强制走 [`Did::parse`] 校验（与 [`Hash32`](super::hash::Hash32)
+/// 的做法一致），确保任何来源的非法 DID 都无法绕过前缀检查进入领域层。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct Did(String);
 
@@ -52,6 +55,27 @@ impl Did {
 impl fmt::Display for Did {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl FromStr for Did {
+    type Err = DomainError;
+
+    /// 委托 [`Did::parse`]，使 `"did:vg:x".parse::<Did>()` 可用。
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Did {
+    /// 从字符串反序列化；强制经过 [`Did::parse`] 校验，
+    /// 非法输入映射为 serde 数据错误而非静默通过。
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Did::parse(&raw).map_err(serde::de::Error::custom)
     }
 }
 
@@ -112,11 +136,32 @@ mod tests {
     }
 
     #[test]
+    fn deserialization_rejects_invalid_did() {
+        // 回归测试：此前 #[serde(transparent)] 派生会绕过 parse 的前缀校验，
+        // 导致 "not-a-did" 这类垃圾输入也能反序列化成 Did。
+        let err = serde_json::from_str::<Did>("\"not-a-did\"")
+            .expect_err("非法前缀的 DID 反序列化必须失败");
+        assert!(err.is_data(), "应为数据错误：{err}");
+        // 前缀正确但后缀为空、以及空字符串，同样必须拒绝
+        assert!(serde_json::from_str::<Did>("\"did:vg:\"").is_err());
+        assert!(serde_json::from_str::<Did>("\"\"").is_err());
+    }
+
+    #[test]
     fn hash_and_eq_semantics_for_map_keys() {
         use std::collections::HashSet;
         let mut set = HashSet::new();
         set.insert(Did::parse("did:vg:batch:b1").unwrap());
         assert!(set.contains(&Did::parse("did:vg:batch:b1").unwrap()));
         assert!(!set.contains(&Did::parse("did:vg:batch:b2").unwrap()));
+    }
+
+    #[test]
+    fn from_str_delegates_to_parse() {
+        let did: Did = "did:vg:agent:z9".parse().expect("FromStr 应委托 parse");
+        assert_eq!(did.as_str(), "did:vg:agent:z9");
+        // 非法输入的错误同样透传
+        let err = "garbage".parse::<Did>().expect_err("非法 DID 应报错");
+        assert!(matches!(err, DomainError::InvalidInput(_)));
     }
 }

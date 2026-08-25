@@ -39,6 +39,12 @@ macro_rules! string_id {
                 f.write_str(&self.0)
             }
         }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                &self.0
+            }
+        }
     };
 }
 
@@ -131,6 +137,15 @@ mod tests {
         );
         let back: BatchId = serde_json::from_str("\"b1\"").unwrap();
         assert_eq!(back, BatchId::new("b1"));
+    }
+
+    #[test]
+    fn ids_expose_as_ref_str() {
+        let batch = BatchId::new("b-77");
+        assert_eq!(batch.as_ref(), "b-77");
+        // 生成型 ID 同样可用 AsRef<str> 透出内部字符串
+        let asset = AssetId::generate();
+        assert_eq!(asset.as_ref(), asset.0);
     }
 
     #[test]
