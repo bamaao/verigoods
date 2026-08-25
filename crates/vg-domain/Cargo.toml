@@ -1,0 +1,15 @@
+[package]
+name = "vg-domain"
+version = "0.1.0"
+edition = "2021"
+description = "VeriGoods 纯领域层：实体、值对象、领域服务与领域错误"
+
+[dependencies]
+thiserror = { workspace = true }
+serde = { workspace = true }
+sha3 = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
