@@ -10,11 +10,12 @@
 //!
 //! 模块划分（后续任务逐步补充）：
 //! - [`shared`]：跨限界上下文共享的值对象与领域错误；
+//! - [`identity`]：身份：DID 文档、能力委托；
 
+pub mod identity;
 pub mod shared;
 
 // ---- 占位：以下上下文模块由后续任务添加 ----
-// pub mod identity;    // 身份：DID 文档、能力委托
 // pub mod credential;  // 凭证：VC、状态簿
 // pub mod lifecycle;   // 生命周期：批次状态机、事件
 // pub mod commodity;   // 商品：Product/Batch/Asset/Lineage

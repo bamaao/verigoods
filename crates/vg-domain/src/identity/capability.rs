@@ -1,0 +1,329 @@
+//! 身份上下文：能力委托（Capability）。
+//!
+//! 企业等主体通过 [`Capability`] 把特定操作委托给智能体；
+//! [`assert_allowed`] 在执行动作前校验能力是否存在且未过期。
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::shared::{Did, DomainError};
+
+/// 可被委托的动作集合。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    /// 读取商品。
+    ReadProduct,
+    /// 创建批次。
+    CreateBatch,
+    /// 发起转移请求。
+    RequestTransfer,
+    /// 转移所有权。
+    TransferOwnership,
+    /// 签发凭证。
+    IssueCredential,
+    /// 撤销凭证。
+    RevokeCredential,
+    /// 注册策略。
+    RegisterPolicy,
+    /// 更新保管（物流节点）。
+    UpdateCustody,
+    /// 提交隐形交易。
+    SubmitShieldedTx,
+    /// 大规模召回。
+    MassRecall,
+}
+
+impl Action {
+    /// snake_case 名称，与 serde 序列化结果一致。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Action::ReadProduct => "read_product",
+            Action::CreateBatch => "create_batch",
+            Action::RequestTransfer => "request_transfer",
+            Action::TransferOwnership => "transfer_ownership",
+            Action::IssueCredential => "issue_credential",
+            Action::RevokeCredential => "revoke_credential",
+            Action::RegisterPolicy => "register_policy",
+            Action::UpdateCustody => "update_custody",
+            Action::SubmitShieldedTx => "submit_shielded_tx",
+            Action::MassRecall => "mass_recall",
+        }
+    }
+}
+
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// 一条能力委托：`granted_by` 授权 `agent` 执行 `action`，可选过期时间。
+///
+/// 字段私有：只能通过 [`Capability::new`] 构造，保证授权方约束不被绕过。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Capability {
+    /// 被授权执行操作的智能体 DID。
+    agent: Did,
+    /// 被委托的动作。
+    action: Action,
+    /// 授权方 DID（必须为非智能体主体）。
+    granted_by: Did,
+    /// 过期时间；`None` 表示长期有效。
+    expires_at: Option<DateTime<Utc>>,
+}
+
+impl Capability {
+    /// 构造能力委托。
+    ///
+    /// 约束：授权方不得是智能体（禁止智能体二次转授），
+    /// 违规返回 [`DomainError::Unauthorized`]。
+    pub fn new(
+        agent: Did,
+        action: Action,
+        granted_by: Did,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<Self, DomainError> {
+        if granted_by.is_agent() {
+            return Err(DomainError::Unauthorized(
+                "授权方不得是智能体（智能体无权转授能力）".into(),
+            ));
+        }
+        Ok(Self {
+            agent,
+            action,
+            granted_by,
+            expires_at,
+        })
+    }
+
+    /// 被授权的智能体 DID。
+    pub fn agent(&self) -> &Did {
+        &self.agent
+    }
+
+    /// 被委托的动作。
+    pub fn action(&self) -> &Action {
+        &self.action
+    }
+
+    /// 授权方 DID。
+    pub fn granted_by(&self) -> &Did {
+        &self.granted_by
+    }
+
+    /// 过期时间（若有）。
+    pub fn expires_at(&self) -> Option<DateTime<Utc>> {
+        self.expires_at
+    }
+
+    /// 是否在 `now` 时刻仍然有效（未过期）。
+    ///
+    /// 无过期时间视为长期有效；到达过期时刻即失效（`now >= expires_at` 为过期）。
+    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
+        match self.expires_at {
+            Some(expires_at) => now < expires_at,
+            None => true,
+        }
+    }
+}
+
+/// 断言能力列表中存在允许执行 `action` 的有效条目。
+///
+/// 无匹配动作或全部已过期时返回 [`DomainError::Unauthorized`] 并携带中文原因。
+pub fn assert_allowed(
+    caps: &[Capability],
+    action: &Action,
+    now: DateTime<Utc>,
+) -> Result<(), DomainError> {
+    let allowed = caps
+        .iter()
+        .any(|cap| cap.action == *action && cap.is_active_at(now));
+    if allowed {
+        Ok(())
+    } else {
+        Err(DomainError::Unauthorized(format!(
+            "缺少执行 `{action}` 的有效能力授权"
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn enterprise() -> Did {
+        Did::parse("did:vg:user:ent-001").unwrap()
+    }
+
+    fn agent() -> Did {
+        Did::parse("did:vg:agent:ag-001").unwrap()
+    }
+
+    fn fixed_time() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
+    }
+
+    // ---- Capability::new ----
+
+    #[test]
+    fn new_with_agent_grantor_is_rejected() {
+        let err = Capability::new(
+            agent(),
+            Action::ReadProduct,
+            agent(), // 授权方是智能体 → 非法
+            None,
+        )
+        .expect_err("授权方为智能体应被拒绝");
+        assert!(
+            matches!(err, DomainError::Unauthorized(_)),
+            "实际错误：{err:?}"
+        );
+    }
+
+    #[test]
+    fn new_with_enterprise_grantor_succeeds_and_keeps_fields_private() {
+        let cap = Capability::new(agent(), Action::CreateBatch, enterprise(), None)
+            .expect("企业授权应成功");
+        assert_eq!(cap.agent(), &agent());
+        assert_eq!(cap.action(), &Action::CreateBatch);
+        assert_eq!(cap.granted_by(), &enterprise());
+        assert_eq!(cap.expires_at(), None);
+    }
+
+    #[test]
+    fn is_active_respects_expiry_boundary() {
+        let at = fixed_time();
+        let expired = Some(at);
+        let future = Some(at + chrono::Duration::hours(1));
+
+        let long_lived =
+            Capability::new(agent(), Action::IssueCredential, enterprise(), None).unwrap();
+        let dead =
+            Capability::new(agent(), Action::IssueCredential, enterprise(), expired).unwrap();
+        let alive =
+            Capability::new(agent(), Action::IssueCredential, enterprise(), future).unwrap();
+
+        assert!(long_lived.is_active_at(at), "无过期时间应长期有效");
+        assert!(!dead.is_active_at(at), "到达过期时刻即视为失效");
+        assert!(alive.is_active_at(at), "未到期应有效");
+    }
+
+    // ---- assert_allowed ----
+
+    #[test]
+    fn empty_capability_list_is_rejected() {
+        let err = assert_allowed(&[], &Action::ReadProduct, fixed_time())
+            .expect_err("空能力列表必须拒绝");
+        assert!(
+            matches!(err, DomainError::Unauthorized(_)),
+            "实际错误：{err:?}"
+        );
+    }
+
+    #[test]
+    fn mismatched_action_is_rejected() {
+        let caps = vec![Capability::new(agent(), Action::CreateBatch, enterprise(), None).unwrap()];
+        let err = assert_allowed(&caps, &Action::MassRecall, fixed_time())
+            .expect_err("动作不匹配必须拒绝");
+        assert!(matches!(err, DomainError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn expired_capability_is_rejected() {
+        let at = fixed_time();
+        let caps = vec![Capability::new(
+            agent(),
+            Action::TransferOwnership,
+            enterprise(),
+            Some(at - chrono::Duration::seconds(1)),
+        )
+        .unwrap()];
+        let err =
+            assert_allowed(&caps, &Action::TransferOwnership, at).expect_err("已过期能力必须拒绝");
+        assert!(matches!(err, DomainError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn matching_unexpired_capability_passes() {
+        let at = fixed_time();
+        let caps = vec![
+            Capability::new(agent(), Action::UpdateCustody, enterprise(), Some(at)).unwrap(),
+            Capability::new(
+                agent(),
+                Action::SubmitShieldedTx,
+                enterprise(),
+                Some(at + chrono::Duration::days(7)),
+            )
+            .unwrap(),
+        ];
+        // 第一条恰好在当前时刻过期 → 由第二条兜底通过
+        assert_allowed(&caps, &Action::SubmitShieldedTx, at).expect("有效能力应放行");
+        // 无过期时间的长期授权也应放行
+        let caps = vec![Capability::new(agent(), Action::ReadProduct, enterprise(), None).unwrap()];
+        assert_allowed(&caps, &Action::ReadProduct, at).expect("长期授权应放行");
+    }
+
+    // ---- serde ----
+
+    #[test]
+    fn action_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&Action::RequestTransfer).unwrap(),
+            "\"request_transfer\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Action::SubmitShieldedTx).unwrap(),
+            "\"submit_shielded_tx\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Action::MassRecall).unwrap(),
+            "\"mass_recall\""
+        );
+
+        let back: Action = serde_json::from_str("\"issue_credential\"").expect("应可反序列化");
+        assert_eq!(back, Action::IssueCredential);
+    }
+
+    #[test]
+    fn capability_json_roundtrip() {
+        let at = fixed_time();
+        let cap = Capability::new(
+            agent(),
+            Action::RegisterPolicy,
+            enterprise(),
+            Some(at + chrono::Duration::days(30)),
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&cap).expect("序列化应成功");
+        assert!(
+            json.contains("\"action\":\"register_policy\""),
+            "实际 JSON：{json}"
+        );
+
+        let back: Capability = serde_json::from_str(&json).expect("反序列化应成功");
+        assert_eq!(back, cap);
+    }
+
+    #[test]
+    fn action_display_matches_serde_name() {
+        for action in [
+            Action::ReadProduct,
+            Action::CreateBatch,
+            Action::RequestTransfer,
+            Action::TransferOwnership,
+            Action::IssueCredential,
+            Action::RevokeCredential,
+            Action::RegisterPolicy,
+            Action::UpdateCustody,
+            Action::SubmitShieldedTx,
+            Action::MassRecall,
+        ] {
+            let json = serde_json::to_string(&action).unwrap();
+            let expected = format!("\"{}\"", action.as_str());
+            assert_eq!(json, expected, "Display/as_str 应与 serde 命名一致");
+        }
+    }
+}
