@@ -13,14 +13,15 @@
 //! - [`identity`]：身份：DID 文档、能力委托；
 //! - [`credential`]：凭证：VC 聚合、状态机与上链锚定端口；
 //! - [`lifecycle`]：生命周期：商品 13 态状态机（含上下架）、事件与端口；
+//! - [`commodity`]：商品：商品类型/批次/单品聚合与谱系；
 
+pub mod commodity;
 pub mod credential;
 pub mod identity;
 pub mod lifecycle;
 pub mod shared;
 
 // ---- 占位：以下上下文模块由后续任务添加 ----
-// pub mod commodity;   // 商品：Product/Batch/Asset/Lineage
 // pub mod ownership;   // 所有权：状态机与转移
 // pub mod policy;      // 策略：领域策略与 ABAC
 // pub mod intent;      // Intent：唯一写入口径
