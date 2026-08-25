@@ -7,11 +7,10 @@ description = "VeriGoods 纯领域层：实体、值对象、领域服务与领�
 [dependencies]
 thiserror = { workspace = true }
 serde = { workspace = true }
+# VC 的 claims 为动态 JSON 值对象（要求 object），属领域值的一部分而非基础设施依赖
+serde_json = { workspace = true }
 sha3 = { workspace = true }
 hex = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }
