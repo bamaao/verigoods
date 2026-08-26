@@ -406,7 +406,10 @@ mod tests {
 
         let mut parent = parent;
         let outcome = parent
-            .split(&[(BatchId::new("b-l"), 6), (BatchId::new("b-r"), 4)])
+            .split(
+                &[(BatchId::new("b-l"), 6), (BatchId::new("b-r"), 4)],
+                fixed_time(),
+            )
             .expect("拆分应成功");
         for child in &outcome.children {
             block_on(repo.save_batch(&mut ctx, child)).expect("保存子批应成功");

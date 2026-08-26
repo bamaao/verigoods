@@ -39,7 +39,6 @@ impl Asset {
     /// - `authenticity_commitment` 不得为 [`Hash32::ZERO`]
     ///   （对应合约 "zero hash" 校验，否则 [`DomainError::InvalidInput`]）；
     /// - 初始状态 [`LifecycleState::Created`]；两个计数均为 0。
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: AssetId,
         product: ProductId,

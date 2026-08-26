@@ -98,20 +98,36 @@ impl Batch {
 
     /// 拆分当前批次为多个子批次。
     ///
-    /// 入参 `children` 为 `(子批 ID, 数量)` 列表。规则：
-    /// - 只允许在**非终态**批次上拆分（终态 →
-    ///   [`DomainError::InvalidTransition`]）;
+    /// 入参 `children` 为 `(子批 ID, 数量)` 列表；`at` 为本次拆分的记账时刻，
+    /// 由调用方（应用层）注入并填入谱系边——领域层不读取真实时钟。
+    ///
+    /// 规则：
+    /// - 只允许在**有效且非终态**的批次上拆分：已失效（`active = false`，
+    ///   如已被拆分/合并的父批）或已进入终态 →
+    ///   [`DomainError::InvalidTransition`]。失效守卫防止对同一份存量
+    ///   重复拆出等量子批（数量双花）；
     /// - 至少一个子批次；每个子批数量 > 0、ID 不等于父批 ID 且互不相同
     ///   （违反 → [`DomainError::InvalidInput`]）；
-    /// - 子批数量之和必须等于父批数量（否则
+    /// - 子批数量之和必须等于父批数量（含求和溢出，否则
     ///   [`DomainError::QuantityMismatch`]）。
     ///
     /// 成功后：子批继承 `product` / `unit` / `produced_at` / `compliance_ok`
     /// 与父批的 `producer`，状态为 [`LifecycleState::Created`] 且有效；
     /// 父批置为失效（`active = false`）。同时返回每对父子一条的
-    /// [`LineageOp::Split`] 谱系边（`at` 取本方法执行时刻）。
-    pub fn split(&mut self, children: &[(BatchId, u64)]) -> Result<SplitOutcome, DomainError> {
-        // 前置条件：聚合自身必须处于非终态
+    /// [`LineageOp::Split`] 谱系边（时间戳取 `at`）。
+    pub fn split(
+        &mut self,
+        children: &[(BatchId, u64)],
+        at: DateTime<Utc>,
+    ) -> Result<SplitOutcome, DomainError> {
+        // 前置条件一：批次必须仍然有效——已被拆分/合并的父批不可再拆分（防双花）
+        if !self.active {
+            return Err(DomainError::InvalidTransition {
+                from: format!("{}({})，已失效", self.state.zh_name(), self.state),
+                to: "拆分(split)".into(),
+            });
+        }
+        // 前置条件二：聚合自身必须处于非终态
         if self.state.is_terminal() {
             return Err(DomainError::InvalidTransition {
                 from: format!("{}({})", self.state.zh_name(), self.state),
@@ -149,8 +165,7 @@ impl Batch {
             return Err(DomainError::QuantityMismatch);
         }
 
-        // 子批继承父批字段；边集合与子批一一对应，时间戳取同一执行时刻
-        let at = Utc::now();
+        // 子批继承父批字段；边集合与子批一一对应，时间戳统一取注入的 `at`
         let child_batches = children
             .iter()
             .map(|(child_id, quantity)| Batch {
@@ -184,24 +199,28 @@ impl Batch {
 
     /// 将多个同源父批次合并为一个新批次（关联函数）。
     ///
+    /// 入参 `at` 为本次合并的记账时刻，由调用方（应用层）注入并填入
+    /// 谱系边——领域层不读取真实时钟。
+    ///
     /// 规则（任一违规即报错，原因为中文说明）：
     /// - 至少一个父批次（[`DomainError::InvalidInput`]）；
     /// - 全部父批必须 `product` / `unit` / `producer` 一致且均有效
     ///   （`active`）、均非终态——一致性/有效性违规 →
     ///   [`DomainError::InvalidInput`]，终态违规 →
     ///   [`DomainError::InvalidTransition`]；
-    /// - 新批数量 = 各父批数量之和；**实现约定**：`produced_at` 取各父批的
-    ///   最早生产时间——入参 `_produced_at` 仅为保持调用方签名兼容而保留，
-    ///   实际一律内部取 `min(children.produced_at)`，传入值被忽略；
+    /// - 新批数量 = 各父批数量之和（含求和溢出 →
+    ///   [`DomainError::InvalidInput`]）；**不变量**：新批 `produced_at`
+    ///   恒取各父批最早生产时间 `min(children.produced_at)`；
     /// - 合规继承采用保守策略：仅当全部父批合规时新批才合规；
     /// - 成功后新批状态 [`LifecycleState::Created`] 且有效；各父批置为失效。
     ///
-    /// 返回新批次与每对父子一条的 [`LineageOp::Merge`] 谱系边。
+    /// 返回新批次与每对父子一条的 [`LineageOp::Merge`] 谱系边
+    /// （时间戳取 `at`）。
     pub fn merge(
         children: &mut [Batch],
         new_id: BatchId,
         producer: Did,
-        _produced_at: DateTime<Utc>,
+        at: DateTime<Utc>,
     ) -> Result<MergeOutcome, DomainError> {
         if children.is_empty() {
             return Err(DomainError::InvalidInput("合并至少需要一个父批次".into()));
@@ -246,14 +265,14 @@ impl Batch {
             .iter()
             .try_fold(0u64, |acc, b| acc.checked_add(b.quantity))
             .ok_or_else(|| DomainError::InvalidInput("合并后的总数量溢出 u64".into()))?;
-        // 实现约定：produced_at 内部取各父批最早生产时间，入参值被忽略
+        // 不变量：新批 produced_at 恒取各父批最早生产时间
         let produced_at = children
             .iter()
             .map(|b| b.produced_at)
             .min()
             .expect("已在上方保证至少一个父批次");
 
-        let at = Utc::now();
+        // 谱系边每父批一条，时间戳统一取注入的 `at`
         let edges = children
             .iter()
             .map(|p| LineageEdge {
@@ -358,7 +377,10 @@ mod tests {
         parent.compliance_ok = true;
 
         let outcome = parent
-            .split(&[(BatchId::new("b-c1"), 6), (BatchId::new("b-c2"), 4)])
+            .split(
+                &[(BatchId::new("b-c1"), 6), (BatchId::new("b-c2"), 4)],
+                fixed_time(),
+            )
             .expect("守恒拆分应成功");
 
         // 数量守恒 + 字段继承
@@ -379,12 +401,13 @@ mod tests {
         // 父批失效
         assert!(!parent.active, "拆分后父批应置为失效");
 
-        // 谱系边：每子批一条，op=Split，方向 parent→child
+        // 谱系边：每子批一条，op=Split，方向 parent→child，时间戳取注入时钟
         assert_eq!(outcome.edges.len(), 2);
         for (edge, child) in outcome.edges.iter().zip(outcome.children.iter()) {
             assert_eq!(edge.parent, BatchId::new("b-p"));
             assert_eq!(edge.child, child.id);
             assert_eq!(edge.op, LineageOp::Split);
+            assert_eq!(edge.at, fixed_time(), "谱系边时间戳应使用注入时钟");
         }
     }
 
@@ -394,7 +417,10 @@ mod tests {
     fn split_quantity_mismatch_is_rejected() {
         let mut parent = make_batch("b-p2", 10);
         let err = parent
-            .split(&[(BatchId::new("x"), 6), (BatchId::new("y"), 5)])
+            .split(
+                &[(BatchId::new("x"), 6), (BatchId::new("y"), 5)],
+                fixed_time(),
+            )
             .expect_err("11 != 10 必须报数量不一致");
         assert!(matches!(err, DomainError::QuantityMismatch), "{err:?}");
         // 失败不得产生副作用
@@ -404,7 +430,9 @@ mod tests {
     #[test]
     fn split_empty_children_list_is_invalid_input() {
         let mut parent = make_batch("b-p3", 10);
-        let err = parent.split(&[]).expect_err("至少需要一个子批次");
+        let err = parent
+            .split(&[], fixed_time())
+            .expect_err("至少需要一个子批次");
         assert!(matches!(err, DomainError::InvalidInput(_)), "{err:?}");
     }
 
@@ -412,7 +440,10 @@ mod tests {
     fn split_duplicate_child_ids_are_invalid_input() {
         let mut parent = make_batch("b-p4", 10);
         let err = parent
-            .split(&[(BatchId::new("dup"), 5), (BatchId::new("dup"), 5)])
+            .split(
+                &[(BatchId::new("dup"), 5), (BatchId::new("dup"), 5)],
+                fixed_time(),
+            )
             .expect_err("重复子批 ID 必须被拒绝");
         assert!(matches!(err, DomainError::InvalidInput(_)), "{err:?}");
     }
@@ -421,7 +452,7 @@ mod tests {
     fn split_child_id_equal_to_parent_is_invalid_input() {
         let mut parent = make_batch("b-p5", 10);
         let err = parent
-            .split(&[(BatchId::new("b-p5"), 10)])
+            .split(&[(BatchId::new("b-p5"), 10)], fixed_time())
             .expect_err("子批 ID 等于父批 ID 必须被拒绝");
         assert!(matches!(err, DomainError::InvalidInput(_)), "{err:?}");
     }
@@ -430,7 +461,10 @@ mod tests {
     fn split_zero_quantity_child_is_invalid_input() {
         let mut parent = make_batch("b-p6", 10);
         let err = parent
-            .split(&[(BatchId::new("a"), 0), (BatchId::new("b"), 10)])
+            .split(
+                &[(BatchId::new("a"), 0), (BatchId::new("b"), 10)],
+                fixed_time(),
+            )
             .expect_err("子批数量为 0 必须被拒绝");
         assert!(matches!(err, DomainError::InvalidInput(_)), "{err:?}");
     }
@@ -440,11 +474,59 @@ mod tests {
         let mut parent = make_batch("b-p7", 10);
         parent.state = LifecycleState::Destroyed;
         let err = parent
-            .split(&[(BatchId::new("c"), 10)])
+            .split(&[(BatchId::new("c"), 10)], fixed_time())
             .expect_err("终态批次不允许拆分");
         assert!(
             matches!(err, DomainError::InvalidTransition { .. }),
             "{err:?}"
+        );
+    }
+
+    // ---- 3.5 失效守卫：防数量双花 ----
+
+    #[test]
+    fn split_on_already_split_parent_is_invalid_transition() {
+        let mut parent = make_batch("dp-1", 10);
+        let first = parent
+            .split(
+                &[(BatchId::new("d-c1"), 6), (BatchId::new("d-c2"), 4)],
+                fixed_time(),
+            )
+            .expect("首次拆分应成功");
+        assert_eq!(first.children.len(), 2);
+        assert!(!parent.active, "首次拆分后父批应失效");
+
+        // 已拆分过的父批（active=false 但非终态）不可再次拆分，
+        // 否则将凭空再造一份等量子批，造成数量双花
+        let err = parent
+            .split(&[(BatchId::new("d-x"), 10)], fixed_time())
+            .expect_err("失效父批不允许再次拆分");
+        assert!(
+            matches!(err, DomainError::InvalidTransition { .. }),
+            "实际错误：{err:?}"
+        );
+    }
+
+    #[test]
+    fn batch_deactivated_by_merge_cannot_be_split_again() {
+        // 合并把全部父批置为 active=false；这些旧父批同样不可再作为拆分源
+        let mut parents = vec![make_batch("mg-1", 4), make_batch("mg-2", 6)];
+        Batch::merge(
+            &mut parents,
+            BatchId::new("mg-new"),
+            producer(),
+            fixed_time(),
+        )
+        .expect("同源合并应成功");
+        assert!(parents.iter().all(|b| !b.active), "合并后旧父批都应失效");
+
+        let mut stale = parents.remove(0); // 模拟从仓储读出的失效旧批
+        let err = stale
+            .split(&[(BatchId::new("mg-z"), 4)], fixed_time())
+            .expect_err("合并后失效的旧父批不允许再拆分");
+        assert!(
+            matches!(err, DomainError::InvalidTransition { .. }),
+            "实际错误：{err:?}"
         );
     }
 
@@ -460,8 +542,8 @@ mod tests {
         batches[1].produced_at = earlier_time(); // 最早生产时间来自中间元素
 
         let new_id = BatchId::new("m-new");
-        let passed_in = fixed_time(); // 故意传入晚于 earliest 的值，验证被忽略
-        let outcome = Batch::merge(&mut batches, new_id.clone(), producer(), passed_in)
+        // at 为注入的记账时刻（晚于 earliest 也无妨，仅用于谱系边）
+        let outcome = Batch::merge(&mut batches, new_id.clone(), producer(), fixed_time())
             .expect("同源合并应成功");
 
         let merged = &outcome.batch;
@@ -481,12 +563,13 @@ mod tests {
         // 全部父批失效
         assert!(batches.iter().all(|b| !b.active), "合并后所有父批都应失效");
 
-        // 谱系边：每父批一条，op=Merge，方向 parent→new
+        // 谱系边：每父批一条，op=Merge，方向 parent→new，时间戳取注入时钟
         assert_eq!(outcome.edges.len(), 3);
         for (edge, parent) in outcome.edges.iter().zip(batches.iter()) {
             assert_eq!(edge.parent, parent.id);
             assert_eq!(edge.child, new_id);
             assert_eq!(edge.op, LineageOp::Merge);
+            assert_eq!(edge.at, fixed_time(), "谱系边时间戳应使用注入时钟");
         }
     }
 
@@ -603,5 +686,53 @@ mod tests {
             matches!(err, DomainError::InvalidTransition { ref to, .. } if to.contains("合并")),
             "终态违规应为 InvalidTransition 且带中文说明：{err:?}"
         );
+    }
+
+    // ---- 6. 溢出守恒 ----
+
+    #[test]
+    fn split_child_quantities_overflowing_u64_is_quantity_mismatch() {
+        let mut parent = make_batch("ov-p", 10);
+        // u64::MAX + u64::MAX 溢出：checked 求和不得回绕/panic，必须按数量不一致拒绝
+        let err = parent
+            .split(
+                &[
+                    (BatchId::new("ov-a"), u64::MAX),
+                    (BatchId::new("ov-b"), u64::MAX),
+                ],
+                fixed_time(),
+            )
+            .expect_err("子批数量求和溢出应视为数量不一致");
+        assert!(matches!(err, DomainError::QuantityMismatch), "{err:?}");
+        assert!(parent.active, "失败的拆分不应改变父批状态");
+    }
+
+    #[test]
+    fn merge_total_quantity_overflowing_u64_is_invalid_input() {
+        let mut batches = vec![make_batch("om-1", u64::MAX), make_batch("om-2", u64::MAX)];
+        let err = Batch::merge(
+            &mut batches,
+            BatchId::new("om-new"),
+            producer(),
+            fixed_time(),
+        )
+        .expect_err("合并总量溢出 u64 必须被拒绝");
+        assert!(
+            matches!(&err, DomainError::InvalidInput(msg) if msg.contains("溢出")),
+            "实际错误：{err:?}"
+        );
+    }
+
+    // ---- 7. serde 回环 ----
+
+    #[test]
+    fn serde_roundtrip_preserves_all_fields() {
+        let mut batch = make_batch("sr-1", 42);
+        batch.compliance_ok = true;
+        batch.state = LifecycleState::InWarehouse;
+
+        let text = serde_json::to_string(&batch).expect("序列化应成功");
+        let back: Batch = serde_json::from_str(&text).expect("反序列化应成功");
+        assert_eq!(back, batch, "serde 往返后字段必须完全一致");
     }
 }
