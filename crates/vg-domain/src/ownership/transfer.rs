@@ -19,6 +19,10 @@ use chrono::{DateTime, Utc};
 /// `transferCount`），用于审计回放时核对计数器连续性。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferRecord {
+    /// 记录标识符（幂等键，仓储实现方据此去重；UUIDv7 字符串，
+    /// 由 [`OwnershipState::transfer`](crate::ownership::OwnershipState::transfer)
+    /// 在领域侧生成，与 [`crate::lifecycle::LifecycleEvent`] 的 `id` 同款先例）。
+    pub id: String,
     /// 转移客体：批次或单品。
     pub subject: SubjectRef,
     /// 原所有者。
@@ -116,6 +120,7 @@ mod tests {
     #[test]
     fn transfer_record_carries_full_audit_fields() {
         let record = TransferRecord {
+            id: "01990000-0000-7000-8000-000000000001".to_string(),
             subject: SubjectRef::Asset(AssetId::new("a-rec-1")),
             from: alice(),
             to: bob(),
@@ -125,6 +130,7 @@ mod tests {
             c2c_count: 1,
         };
         assert_eq!(record.subject, SubjectRef::Asset(AssetId::new("a-rec-1")));
+        assert!(!record.id.is_empty(), "幂等键 id 必须非空");
         assert_eq!(record.from, alice());
         assert_eq!(record.to, bob());
         assert!(record.c2c);
@@ -135,6 +141,7 @@ mod tests {
     #[test]
     fn transfer_record_serde_roundtrip_for_audit_replay() {
         let record = TransferRecord {
+            id: "01990000-0000-7000-8000-000000000002".to_string(),
             subject: SubjectRef::Batch(BatchId::new("b-rec-1")),
             from: alice(),
             to: bob(),
@@ -145,8 +152,11 @@ mod tests {
         };
         let text = serde_json::to_string(&record).expect("序列化应成功");
         assert!(
-            text.contains("\"c2c\":true") && text.contains("\"from\"") && text.contains("\"to\""),
-            "字段应为蛇形命名：{text}"
+            text.contains("\"id\"")
+                && text.contains("\"c2c\":true")
+                && text.contains("\"from\"")
+                && text.contains("\"to\""),
+            "字段应为蛇形命名且含幂等键：{text}"
         );
         let back: TransferRecord = serde_json::from_str(&text).expect("反序列化应成功");
         assert_eq!(back, record, "审计回放要求 serde 往返无损");

@@ -69,7 +69,11 @@ impl OwnershipState {
     ///   状态，与 lifecycle 状态机拒绝自迁移同一裁决口径；[`DomainError::Unauthorized`]
     ///   保留给操作者角色不足场景（合约 `onlyRole` 校验由应用层承担）；
     /// - 目标非零地址的检查同样由 [`Did`] 的构造校验天然满足（见
-    ///   [`Self::initialize`] 注释）。
+    ///   [`Self::initialize`] 注释）；
+    /// - 任一计数器已达 `u32::MAX` → [`DomainError::InvalidInput`]：
+    ///   自增走 `checked_add`，与 commodity 批次合并总量溢出同一先例选型
+    ///   （溢出属输入/存量异常而非状态迁移问题）；release 下裸 `+=` 会静默
+    ///   回绕，破坏 [`TransferRecord`] 计数的审计连续性；
     ///
     /// 成功后：`owner` 更新、`acquired_at` 刷新为 `at`、`transfer_count`
     /// 自增且 `c2c = true` 时额外自增 `c2c_count`；失败时不产生任何副作用。
@@ -86,20 +90,40 @@ impl OwnershipState {
                 to: to.to_string(),
             });
         }
+        // 计数器溢出守卫：先检查后变更，保证失败时零副作用
+        let next_transfer_count = self.transfer_count.checked_add(1).ok_or_else(|| {
+            DomainError::InvalidInput(format!(
+                "转移计数溢出：transfer_count 已达 {}，拒绝转移",
+                u32::MAX
+            ))
+        })?;
+        let next_c2c_count = if c2c {
+            self.c2c_count.checked_add(1).ok_or_else(|| {
+                DomainError::InvalidInput(format!(
+                    "C2C 转移计数溢出：c2c_count 已达 {}，拒绝转移",
+                    u32::MAX
+                ))
+            })?
+        } else {
+            self.c2c_count
+        };
         let from = std::mem::replace(&mut self.owner, to.clone());
         self.acquired_at = at;
-        self.transfer_count += 1;
-        if c2c {
-            self.c2c_count += 1;
-        }
+        self.transfer_count = next_transfer_count;
+        self.c2c_count = next_c2c_count;
         Ok(TransferRecord {
+            // 记录 ID 在领域侧生成：`Uuid::now_v7` 是项目允许的 ID 工厂先例
+            // （shared::ids IntentId::generate 同款），时间有序利于审计回放；
+            // 不改为调用方传参，避免转移 API 被 ID 管理细节污染。仓储侧按该
+            // ID 幂等去重（pg 唯一键）。
+            id: uuid::Uuid::now_v7().to_string(),
             subject: self.subject.clone(),
             from,
             to: to.clone(),
             c2c,
             at,
-            transfer_count: self.transfer_count,
-            c2c_count: self.c2c_count,
+            transfer_count: next_transfer_count,
+            c2c_count: next_c2c_count,
         })
     }
 }
@@ -272,6 +296,25 @@ mod tests {
     }
 
     #[test]
+    fn transfer_stamps_unique_uuid_v7_ids_on_records() {
+        let mut state = owned_by_alice();
+        let r1 = state
+            .transfer(&bob(), false, fixed_time())
+            .expect("第一次转移应成功");
+        let r2 = state
+            .transfer(&carol(), true, later_time())
+            .expect("第二次转移应成功");
+
+        // 每条记录都携带幂等键，且互不相同（仓储据此去重）
+        for r in [&r1, &r2] {
+            assert_eq!(r.id.len(), 36, "应为标准连字符 UUID 形态：{}", r.id);
+            // UUIDv7 版本位：第 14 个字符（第三组首字符）恒为 '7'
+            assert_eq!(r.id.as_bytes()[14], b'7', "应为 v7 UUID：{}", r.id);
+        }
+        assert_ne!(r1.id, r2.id, "两次转移的记录 ID 必须唯一");
+    }
+
+    #[test]
     fn self_transfer_is_rejected_as_invalid_transition_without_side_effects() {
         let mut state = owned_by_alice();
         let err = state
@@ -286,6 +329,55 @@ mod tests {
         assert_eq!(state.owner, alice());
         assert_eq!(state.acquired_at, fixed_time());
         assert_eq!((state.transfer_count, state.c2c_count), (0, 0));
+    }
+
+    // ---- 所有权：计数器溢出守卫 ----
+
+    #[test]
+    fn transfer_overflowing_transfer_count_is_rejected_without_side_effects() {
+        // 存量值可经 Deserialize 载入，u32::MAX 必须真实可达：一次转移即触发溢出
+        let mut state = OwnershipState {
+            subject: batch_subject("b-ovf-1"),
+            owner: alice(),
+            acquired_at: fixed_time(),
+            transfer_count: u32::MAX,
+            c2c_count: 3,
+        };
+        let err = state
+            .transfer(&bob(), false, later_time())
+            .expect_err("transfer_count 溢出必须被拒绝而非回绕");
+        assert!(
+            matches!(&err, DomainError::InvalidInput(msg) if msg.contains("溢出")),
+            "与 commodity 批次合并总量溢出同一先例选型，实际错误：{err:?}"
+        );
+        // 失败零副作用：所有字段纹丝不动
+        assert_eq!(state.owner, alice());
+        assert_eq!(state.acquired_at, fixed_time());
+        assert_eq!(state.transfer_count, u32::MAX);
+        assert_eq!(state.c2c_count, 3);
+    }
+
+    #[test]
+    fn c2c_overflowing_c2c_count_is_rejected_without_side_effects() {
+        let mut state = OwnershipState {
+            subject: batch_subject("b-ovf-2"),
+            owner: alice(),
+            acquired_at: fixed_time(),
+            transfer_count: 5,
+            c2c_count: u32::MAX,
+        };
+        let err = state
+            .transfer(&bob(), true, later_time())
+            .expect_err("c2c=true 且 c2c_count 溢出必须被拒绝而非回绕");
+        assert!(
+            matches!(&err, DomainError::InvalidInput(msg) if msg.contains("溢出")),
+            "实际错误：{err:?}"
+        );
+        // 失败零副作用：owner / acquired_at / 两个计数器全部不变
+        assert_eq!(state.owner, alice());
+        assert_eq!(state.acquired_at, fixed_time());
+        assert_eq!(state.transfer_count, 5);
+        assert_eq!(state.c2c_count, u32::MAX);
     }
 
     #[test]

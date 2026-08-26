@@ -13,7 +13,8 @@
 //!   **不触碰** owner 与计数器。
 //!
 //! 两个值对象除 `subject` 外字段零交集，仓储端口亦分列
-//! `init_owner`/`get` 与 `update_custody`。
+//! `init_owner`/`get`/`save` 与 `update_custody`，审计线独立为
+//! `record_transfer`/`history`（追加式、按记录 ID 幂等）。
 
 pub mod states;
 pub mod transfer;
@@ -60,6 +61,17 @@ pub mod ports {
             subject: &SubjectRef,
         ) -> Result<Option<OwnershipState>, DomainError>;
 
+        /// 整体替换保存所有权状态：转移写路径 `get` → [`OwnershipState::transfer`]
+        /// → `save` 的落库端。
+        ///
+        /// upsert 语义（与 commodity 的 `save_*` 同款）：正常流程先经
+        /// [`Self::init_owner`] 建档，本方法用于后续变更的整体替换。
+        async fn save(
+            &self,
+            ctx: &mut Self::Context,
+            state: &OwnershipState,
+        ) -> Result<(), DomainError>;
+
         /// 记录一次保管状态（upsert：无则建档，有则覆盖 custodian/since）。
         ///
         /// 保管与所有权的存储完全独立，本方法不读取也不校验所有权档案。
@@ -69,7 +81,17 @@ pub mod ports {
             custody: &CustodyState,
         ) -> Result<(), DomainError>;
 
-        /// 返回某主体**按发生序**排列的全部所有权转移记录（审计回放）。
+        /// 追加一条所有权转移记录到审计日志。
+        ///
+        /// 幂等语义：按 `record.id` 去重，重复提交同一条记录不产生新条目
+        /// （pg 实现可用 `record.id` 唯一键落地同一语义）。
+        async fn record_transfer(
+            &self,
+            ctx: &mut Self::Context,
+            record: &TransferRecord,
+        ) -> Result<(), DomainError>;
+
+        /// 返回某主体**按追加序**排列的全部所有权转移记录（审计回放）。
         async fn history(
             &self,
             ctx: &mut Self::Context,
@@ -124,6 +146,16 @@ mod tests {
             Ok(ctx.owners.get(subject).cloned())
         }
 
+        async fn save(
+            &self,
+            ctx: &mut Self::Context,
+            state: &OwnershipState,
+        ) -> Result<(), DomainError> {
+            // 整体替换（upsert）：正常流程先经 init_owner 建档
+            ctx.owners.insert(state.subject.clone(), state.clone());
+            Ok(())
+        }
+
         async fn update_custody(
             &self,
             ctx: &mut Self::Context,
@@ -131,6 +163,19 @@ mod tests {
         ) -> Result<(), DomainError> {
             // upsert：保管与所有权存储完全独立
             ctx.custody.insert(custody.subject.clone(), custody.clone());
+            Ok(())
+        }
+
+        async fn record_transfer(
+            &self,
+            ctx: &mut Self::Context,
+            record: &TransferRecord,
+        ) -> Result<(), DomainError> {
+            // 幂等：按记录 ID 去重（pg 侧唯一键落地同一语义）
+            if ctx.transfers.iter().any(|r| r.id == record.id) {
+                return Ok(());
+            }
+            ctx.transfers.push(record.clone());
             Ok(())
         }
 
@@ -220,7 +265,7 @@ mod tests {
         assert_eq!(stored_custody.custodian, courier);
         assert_eq!(stored_custody.since, fixed_time());
 
-        // 两笔转移：普通 → C2C；记录落库后按发生序完整取回
+        // 两笔转移：普通 → C2C；经端口追加审计记录后按追加序完整取回
         let mut state = found;
         let r1 = state
             .transfer(&bob(), false, later_time())
@@ -228,8 +273,8 @@ mod tests {
         let r2 = state
             .transfer(&carol(), true, later_time())
             .expect("转移应成功");
-        ctx.transfers.push(r1.clone());
-        ctx.transfers.push(r2.clone());
+        block_on(repo.record_transfer(&mut ctx, &r1)).expect("追加记录应成功");
+        block_on(repo.record_transfer(&mut ctx, &r2)).expect("追加记录应成功");
 
         let history = block_on(repo.history(&mut ctx, &subject)).expect("查询不应报错");
         assert_eq!(history.len(), 2, "只应包含 b-repo-1 的两笔转移");
@@ -268,6 +313,73 @@ mod tests {
     }
 
     #[test]
+    fn save_completes_get_transfer_save_write_path() {
+        let repo = MemRepo;
+        let mut ctx = MemStore::default();
+        let subject = batch_subject("b-save-1");
+        block_on(repo.init_owner(
+            &mut ctx,
+            &OwnershipState::initialize(subject.clone(), alice(), fixed_time()),
+        ))
+        .expect("初始化应成功");
+
+        // get → transfer → save：应用层经由端口即可完成整个转移落库
+        let mut state = block_on(repo.get(&mut ctx, &subject))
+            .expect("查询不应报错")
+            .expect("所有权应存在");
+        let record = state
+            .transfer(&bob(), true, later_time())
+            .expect("转移应成功");
+        block_on(repo.save(&mut ctx, &state)).expect("save 应成功");
+        block_on(repo.record_transfer(&mut ctx, &record)).expect("record_transfer 应成功");
+
+        // 所有权状态整体替换生效：owner/计数器/acquired_at 全部落库
+        let stored = block_on(repo.get(&mut ctx, &subject))
+            .expect("查询不应报错")
+            .expect("所有权应存在");
+        assert_eq!(stored.owner, bob());
+        assert_eq!((stored.transfer_count, stored.c2c_count), (1, 1));
+        assert_eq!(stored.acquired_at, later_time());
+
+        // 审计日志含且仅含该笔记录
+        let history = block_on(repo.history(&mut ctx, &subject)).expect("查询不应报错");
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0], record);
+    }
+
+    #[test]
+    fn record_transfer_deduplicates_by_record_id() {
+        let repo = MemRepo;
+        let mut ctx = MemStore::default();
+        let subject = batch_subject("b-idem-1");
+        block_on(repo.init_owner(
+            &mut ctx,
+            &OwnershipState::initialize(subject.clone(), alice(), fixed_time()),
+        ))
+        .expect("初始化应成功");
+
+        let mut state = block_on(repo.get(&mut ctx, &subject))
+            .expect("查询不应报错")
+            .expect("所有权应存在");
+        let r1 = state
+            .transfer(&bob(), false, later_time())
+            .expect("转移应成功");
+        let r2 = state
+            .transfer(&carol(), true, later_time())
+            .expect("转移应成功");
+
+        block_on(repo.record_transfer(&mut ctx, &r1)).expect("首次追加应成功");
+        block_on(repo.record_transfer(&mut ctx, &r2)).expect("追加应成功");
+        // 幂等：同一记录（同 id）重复提交不产生新条目
+        block_on(repo.record_transfer(&mut ctx, &r1)).expect("重复提交应幂等成功");
+
+        let history = block_on(repo.history(&mut ctx, &subject)).expect("查询不应报错");
+        assert_eq!(history.len(), 2, "按 id 去重后应只有两笔记录");
+        assert_eq!(history[0].id, r1.id);
+        assert_eq!(history[1].id, r2.id);
+    }
+
+    #[test]
     fn ownership_transfer_and_custody_update_never_touch_each_other() {
         let repo = MemRepo;
         let mut ctx = MemStore::default();
@@ -294,9 +406,8 @@ mod tests {
         let record = ownership
             .transfer(&bob(), false, later_time())
             .expect("转移应成功");
-        ctx.transfers.push(record);
-        // 应用层常规写路径：get → transfer → 整体替换保存
-        ctx.owners.insert(subject.clone(), ownership.clone());
+        block_on(repo.save(&mut ctx, &ownership)).expect("保存转移结果应成功");
+        block_on(repo.record_transfer(&mut ctx, &record)).expect("追加转移记录应成功");
 
         assert_eq!(
             ctx.custody.get(&subject).unwrap().custodian,
@@ -330,6 +441,10 @@ mod tests {
             (ownership_after.transfer_count, ownership_after.c2c_count),
             (ownership.transfer_count, ownership.c2c_count),
             "保管更新不得影响计数器"
+        );
+        assert_eq!(
+            ownership_after.acquired_at, ownership.acquired_at,
+            "保管更新不得刷新取得时刻"
         );
         assert_eq!(ctx.custody.get(&subject).unwrap().custodian, courier_b);
         assert_eq!(ctx.custody.get(&subject).unwrap().since, later_time());
