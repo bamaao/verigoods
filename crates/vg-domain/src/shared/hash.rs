@@ -57,6 +57,11 @@ impl Hash32 {
     pub fn is_zero(&self) -> bool {
         self.0 == [0u8; 32]
     }
+
+    /// 以原始 32 字节切片暴露内部值（供承诺前像编码等定长拼接场景）。
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
 }
 
 impl fmt::Display for Hash32 {
@@ -140,6 +145,14 @@ mod tests {
         let all_zero = format!("0x{}", "00".repeat(32));
         assert!(Hash32::from_hex(&all_zero).unwrap().is_zero());
         assert!(!Hash32::ZERO.as_hex().contains('1'));
+    }
+
+    #[test]
+    fn as_bytes_exposes_raw_digest() {
+        let h = Hash32::keccak(b"abc");
+        assert_eq!(h.as_bytes().len(), 32);
+        assert_eq!(Hash32::keccak(h.as_bytes()), Hash32::keccak(h.as_bytes()));
+        assert_eq!(Hash32::ZERO.as_bytes(), &[0u8; 32]);
     }
 
     #[test]

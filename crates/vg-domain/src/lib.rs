@@ -17,15 +17,18 @@
 //! - [`ownership`]：所有权：所有权/保管分离模型、转移记录与端口；
 //! - [`policy`]：策略：监管域、策略引擎与 ABAC；
 //! - [`intent`]：Intent：唯一写入口径、状态机与风险分级；
+//! - [`privacy`]：隐私：票据、隐形地址、加密附加数据；
+//! - [`ports`]：全局服务端口：账本锚定、ZK 证明、Note 哈希；
+//! - [`events`]：领域事件：outbox 投递的最终事实。
 
 pub mod commodity;
 pub mod credential;
+pub mod events;
 pub mod identity;
 pub mod intent;
 pub mod lifecycle;
 pub mod ownership;
 pub mod policy;
+pub mod ports;
+pub mod privacy;
 pub mod shared;
-
-// ---- 占位：以下上下文模块由后续任务添加 ----
-// pub mod privacy;     // 隐私：票据、隐形地址
