@@ -15,15 +15,16 @@
 //! - [`lifecycle`]：生命周期：商品 13 态状态机（含上下架）、事件与端口；
 //! - [`commodity`]：商品：商品类型/批次/单品聚合与谱系；
 //! - [`ownership`]：所有权：所有权/保管分离模型、转移记录与端口；
+//! - [`policy`]：策略：监管域、策略引擎与 ABAC；
 
 pub mod commodity;
 pub mod credential;
 pub mod identity;
 pub mod lifecycle;
 pub mod ownership;
+pub mod policy;
 pub mod shared;
 
 // ---- 占位：以下上下文模块由后续任务添加 ----
-// pub mod policy;      // 策略：领域策略与 ABAC
 // pub mod intent;      // Intent：唯一写入口径
 // pub mod privacy;     // 隐私：票据、隐形地址
