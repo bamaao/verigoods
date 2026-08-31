@@ -29,8 +29,8 @@ pub use ecies::{decrypt_with, encrypt_to};
 pub use keypair::{pubkey_to_did, KeyPair};
 pub use poseidon::{poseidon_note_commitment, to_field_le, PoseidonNoteHasher};
 pub use stealth::{
-    derive_one_time, derive_one_time_with_r, scan_and_unlock, unlock_spend_key,
-    SharedSecretBytes, StealthMetaAddressView, UnlockInfo,
+    derive_one_time, derive_one_time_with_r, scan_and_unlock, unlock_spend_key, SharedSecretBytes,
+    StealthMetaAddressView, UnlockInfo,
 };
 
 /// 密码学原语统一错误。
@@ -48,6 +48,12 @@ pub enum CryptoError {
     /// 对称解密失败（AEAD 认证校验未通过）。
     #[error("解密失败：密文被篡改或不匹配")]
     Decryption,
+    /// 加密路径失败（ephemeral 私钥构造、密钥派生、AEAD 加密）。
+    #[error("加密运算失败：{0}")]
+    Encryption(String),
+    /// 非法标量（ephemeral 标量退化使 ECDH 乘积为无穷远点）。
+    #[error("非法标量：ECDH 共享点退化")]
+    InvalidScalar,
     /// 签名/恢复/私钥构造失败。
     #[error("签名运算失败：{0}")]
     Signing(String),

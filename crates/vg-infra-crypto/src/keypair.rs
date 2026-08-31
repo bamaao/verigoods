@@ -6,6 +6,16 @@
 //! - 签名返回**分离式** `(Signature, RecoveryId)`；
 //! - 验签 / 公钥恢复同样以 keccak256 预哈希为 z。
 //!
+//! ## 域分隔契约（调用方责任）
+//!
+//! 本层做的是**裸 keccak prehash ECDSA**：`z = keccak256(msg)` 无任何
+//! 域标签，签名与外部 keccak 协议（如 Ethereum personal_sign/EIP-191、
+//! 任意其他 keccak-ECDSA 系统）在密码学上**不可区分**——跨协议签名
+//! 重放（signature confusion）风险由调用方承担。**调用方必须在挑战
+//! 构造中包含 VG 域分隔标签**（如 `vg:sig:v1` + method + nonce + ts
+//! 等上下文绑定字段），本层不代做域分隔。Task 23 VG-SIG 中间件
+//! 继承此契约并在挑战构造层实现域分隔。
+//!
 //! ## 公钥摘要与 DID 口径
 //!
 //! 全仓唯一公钥摘要口径：`keccak256(33 字节压缩 sec1)`（与
@@ -82,11 +92,7 @@ pub fn verify(pubkey: &PublicKey, sig: &Signature, msg: &[u8]) -> bool {
 }
 
 /// 从签名恢复公钥：`recover(sig, rid, keccak256(msg))`。
-pub fn recover(
-    sig: &Signature,
-    rid: RecoveryId,
-    msg: &[u8],
-) -> Result<PublicKey, CryptoError> {
+pub fn recover(sig: &Signature, rid: RecoveryId, msg: &[u8]) -> Result<PublicKey, CryptoError> {
     let prehash = crate::keccak256(msg);
     VerifyingKey::recover_from_prehash(&prehash, sig, rid)
         .map(Into::into)
@@ -124,7 +130,10 @@ mod tests {
         let kp = KeyPair::from_secret(sk.clone());
         assert_eq!(kp.secret(), &sk);
         assert_eq!(*kp.public(), sk.public_key());
-        assert_eq!(kp.public_compressed(), KeyPair::from_secret(sk).public_compressed());
+        assert_eq!(
+            kp.public_compressed(),
+            KeyPair::from_secret(sk).public_compressed()
+        );
     }
 
     #[test]
@@ -163,10 +172,7 @@ mod tests {
         let did = pubkey_to_did(kp.public());
         assert!(did.starts_with("did:vg:"));
         assert_eq!(did.len(), "did:vg:".len() + 64);
-        assert_eq!(
-            &did["did:vg:".len()..],
-            &kp.pubkey_digest().as_hex()
-        );
+        assert_eq!(&did["did:vg:".len()..], &kp.pubkey_digest().as_hex());
         // 恢复出的公钥得到同一 DID（VG-SIG 链路）
         let (sig, rid) = kp.sign_recoverable(b"auth").unwrap();
         let recovered = recover(&sig, rid, b"auth").unwrap();

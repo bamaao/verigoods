@@ -18,13 +18,18 @@
 //! - nonce 为每次加密的 12 字节随机；
 //! - GCM 的 AAD = ephemeral 的 33 字节压缩编码（绑定密文首段：x-only ECDH
 //!   下翻转压缩前缀不改变共享 x，必须以 AAD 保证该字节被认证）。
+//!
+//! **长度泄漏**：不做长度填充，明文长度经密文长度泄漏（密文长度 =
+//! 明文长度 + 16B tag）；调用方如需隐藏长度必须自行 pad。
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
 use hkdf::Hkdf;
-use k256::elliptic_curve::{bigint::U256, ops::Reduce, point::AffineCoordinates, sec1::ToEncodedPoint};
+use k256::elliptic_curve::{
+    bigint::U256, ops::Reduce, point::AffineCoordinates, sec1::ToEncodedPoint,
+};
 use k256::{FieldBytes, ProjectivePoint, PublicKey, Scalar, SecretKey};
 use rand::RngCore;
 use sha2::Sha256;
@@ -45,9 +50,8 @@ pub fn encrypt_to(peer: &PublicKey, plaintext: &[u8]) -> Result<Vec<u8>, CryptoE
     // 随机 ephemeral 密钥与 nonce
     let mut k_bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut k_bytes);
-    let ephemeral = SecretKey::from_bytes(&FieldBytes::from(k_bytes)).map_err(|e| {
-        CryptoError::Signing(format!("ephemeral 私钥生成失败：{e}"))
-    })?;
+    let ephemeral = SecretKey::from_bytes(&FieldBytes::from(k_bytes))
+        .map_err(|e| CryptoError::Encryption(format!("ephemeral 私钥生成失败：{e}")))?;
     let ephemeral_pub = ephemeral.public_key();
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -61,7 +65,7 @@ pub fn encrypt_to(peer: &PublicKey, plaintext: &[u8]) -> Result<Vec<u8>, CryptoE
     let aad = eph_bytes.as_bytes();
 
     let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|_| CryptoError::Signing("AES 密钥长度错误".into()))?;
+        .map_err(|_| CryptoError::Encryption("AES 密钥长度错误".into()))?;
     let ct = cipher
         .encrypt(
             Nonce::from_slice(&nonce_bytes),
@@ -70,7 +74,7 @@ pub fn encrypt_to(peer: &PublicKey, plaintext: &[u8]) -> Result<Vec<u8>, CryptoE
                 aad,
             },
         )
-        .map_err(|e| CryptoError::Signing(format!("加密失败：{e}")))?;
+        .map_err(|e| CryptoError::Encryption(format!("加密失败：{e}")))?;
 
     // ephemeral 压缩 33B ‖ nonce 12B ‖ ct‖tag
     let mut out = Vec::with_capacity(EPHEMERAL_LEN + NONCE_LEN + ct.len());

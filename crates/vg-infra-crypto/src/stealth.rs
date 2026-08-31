@@ -15,7 +15,9 @@
 //!   ECDH 共享点的 x 坐标取 **32 字节大端**（k256 `FieldBytes` 原生序）。
 //! - 解锁（支出方）：`d = spendPriv + t (mod n)`，则 `d·G == P`。
 
-use k256::elliptic_curve::{bigint::U256, ops::Reduce, point::AffineCoordinates, sec1::ToEncodedPoint};
+use k256::elliptic_curve::{
+    bigint::U256, group::Group, ops::Reduce, point::AffineCoordinates, sec1::ToEncodedPoint,
+};
 use k256::{FieldBytes, ProjectivePoint, PublicKey, Scalar, SecretKey};
 use rand::rngs::OsRng;
 use vg_domain::privacy::{CompressedPoint, OneTimeAddress, StealthMetaAddress};
@@ -80,10 +82,13 @@ pub fn compress(pubkey: &PublicKey) -> CompressedPoint {
 }
 
 /// 随机派生一次性地址（[`derive_one_time_with_r`] 的随机 r 封装）。
+///
+/// r 为无偏随机标量（`generate_vartime` + OsRng）；随机 r 使结果退化为
+/// 无穷远点的概率不可达，但错误如实传播（签名见 [`derive_one_time_with_r`]）。
 pub fn derive_one_time(
     meta: &StealthMetaAddressView,
-) -> (OneTimeAddress, SharedSecretBytes) {
-    let r = Scalar::generate_biased(&mut OsRng);
+) -> Result<(OneTimeAddress, SharedSecretBytes), CryptoError> {
+    let r = Scalar::generate_vartime(&mut OsRng);
     derive_one_time_with_r(&r, meta)
 }
 
@@ -91,26 +96,42 @@ pub fn derive_one_time(
 ///
 /// 算法：`R = r·G`；`sS = r·viewPub`；`t = keccak256(sS.x)`；
 /// `stealth = spendPub + t·G`。返回一次性地址与 sS.x 原始 32 字节。
+///
+/// 错误（pub API 不 panic 契约）：
+/// - `r == 0`（`R` 为无穷远点）→ [`CryptoError::InvalidScalar`]；
+/// - `sS = r·viewPub` 为无穷远点（含 r == 0 情形）→
+///   [`CryptoError::InvalidScalar`]；
+/// - `stealth = spendPub + t·G` 为无穷远点（`spend_pub` 恰为 `-t·G`，
+///   概率不可达）→ [`CryptoError::InvalidPoint`]。
 pub fn derive_one_time_with_r(
     r: &Scalar,
     meta: &StealthMetaAddressView,
-) -> (OneTimeAddress, SharedSecretBytes) {
+) -> Result<(OneTimeAddress, SharedSecretBytes), CryptoError> {
     let g = ProjectivePoint::GENERATOR;
     let r_pt = g * r;
     let ss = ProjectivePoint::from(meta.view_pub) * r;
+    if bool::from(ss.is_identity()) {
+        return Err(CryptoError::InvalidScalar);
+    }
     let x = ss.to_affine().x(); // 32 字节大端
 
     let t = crate::keccak256(x.as_slice());
     let t_scalar = <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(t));
     let stealth = ProjectivePoint::from(meta.spend_pub) + g * t_scalar;
 
-    (
+    Ok((
         OneTimeAddress {
-            addr_point: compress(&PublicKey::from_affine(stealth.to_affine()).expect("合法点")),
-            ephemeral: compress(&PublicKey::from_affine(r_pt.to_affine()).expect("合法点")),
+            addr_point: compress(
+                &PublicKey::from_affine(stealth.to_affine())
+                    .map_err(|_| CryptoError::InvalidPoint)?,
+            ),
+            ephemeral: compress(
+                &PublicKey::from_affine(r_pt.to_affine())
+                    .map_err(|_| CryptoError::InvalidScalar)?,
+            ),
         },
         SharedSecretBytes(x.into()),
-    )
+    ))
 }
 
 /// 接收方扫描：命中返回 [`UnlockInfo`]，否则 `None`。
@@ -161,7 +182,13 @@ mod tests {
         (sk, pk)
     }
 
-    fn meta_fixture() -> (SecretKey, PublicKey, SecretKey, PublicKey, StealthMetaAddressView) {
+    fn meta_fixture() -> (
+        SecretKey,
+        PublicKey,
+        SecretKey,
+        PublicKey,
+        StealthMetaAddressView,
+    ) {
         let (view_sk, view_pk) = keypair();
         let (spend_sk, spend_pk) = keypair();
         let meta = StealthMetaAddressView {
@@ -207,11 +234,11 @@ mod tests {
     #[test]
     fn derive_and_scan_end_to_end_consistency() {
         let (view_sk, _, spend_sk, spend_pk, meta) = meta_fixture();
-        let r = Scalar::generate_biased(&mut OsRng);
-        let (ot, shared) = derive_one_time_with_r(&r, &meta);
+        let r = Scalar::generate_vartime(&mut OsRng);
+        let (ot, shared) = derive_one_time_with_r(&r, &meta).expect("随机 r 派生应成功");
 
         // 确定性：同 r 同输出
-        let (ot2, shared2) = derive_one_time_with_r(&r, &meta);
+        let (ot2, shared2) = derive_one_time_with_r(&r, &meta).expect("同 r 应同输出");
         assert_eq!(ot, ot2);
         assert_eq!(shared, shared2);
 
@@ -232,8 +259,8 @@ mod tests {
     fn scan_miss_returns_none() {
         // 正确 view 密钥但错误的 spend 公钥 → 不命中
         let (view_sk, _, _, spend_pk, meta) = meta_fixture();
-        let r = Scalar::generate_biased(&mut OsRng);
-        let (ot, _) = derive_one_time_with_r(&r, &meta);
+        let r = Scalar::generate_vartime(&mut OsRng);
+        let (ot, _) = derive_one_time_with_r(&r, &meta).expect("随机 r 派生应成功");
         // 用别人的 spend 公钥扫描
         let (_, wrong_spend) = keypair();
         let _ = spend_pk;
@@ -245,10 +272,18 @@ mod tests {
     }
 
     #[test]
+    fn zero_r_returns_invalid_scalar_error() {
+        let (_, _, _, _, meta) = meta_fixture();
+        // r == 0：R 与 sS 均退化为无穷远点 → Err(InvalidScalar)，不得 panic
+        let err = derive_one_time_with_r(&Scalar::ZERO, &meta).expect_err("零 r 必须返回错误");
+        assert!(matches!(err, CryptoError::InvalidScalar));
+    }
+
+    #[test]
     fn random_derive_differs_each_time() {
         let (_, _, _, _, meta) = meta_fixture();
-        let (a, _) = derive_one_time(&meta);
-        let (b, _) = derive_one_time(&meta);
+        let (a, _) = derive_one_time(&meta).unwrap();
+        let (b, _) = derive_one_time(&meta).unwrap();
         assert_ne!(a, b, "随机 r 必须产生不同一次性地址");
     }
 }

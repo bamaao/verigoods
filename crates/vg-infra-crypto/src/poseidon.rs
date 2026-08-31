@@ -60,6 +60,11 @@ const DOMAIN_LABEL: &[u8] = b"vg:poseidon:v1";
 /// 词 b[0..32] 拆 8 个连续小端 u32 limb，每个 limb 经
 /// `KoalaBear::from_int(limb)` 规范归约载入（KoalaBear 为 31-bit
 /// 素域，u32 limb 可能 ≥ p，from_int 做模 p 归约）。
+///
+/// **非单射警告**：from_int 归约使编码非单射（limb ≥ p 的不同字节串坍缩
+/// 为同一域元素），本编码**仅作 Note 承诺前像的域元素装载用途**（前像已
+/// 由结构化 6 词构造保证语义），不是密码学抗碰撞字节哈希——勿将本函数
+/// 对外当通用哈希使用。
 pub fn to_field_le(bytes: &[u8; 32]) -> Vec<KoalaBear> {
     let mut out = Vec::with_capacity(8);
     for i in 0..8 {
@@ -79,7 +84,8 @@ fn elem_to_le_bytes(e: &KoalaBear) -> [u8; 4] {
     e.as_canonical_u32().to_le_bytes()
 }
 
-/// 惰性构造共享置换（轮常数全为编译期预置常量，构造确定性）。
+/// 构造置换（每次调用重建；轮常数全为编译期预置常量，重建确定性且
+/// 成本极低，刻意不引入 OnceLock 等共享态复杂度）。
 fn permutation() -> Poseidon2KoalaBear<WIDTH> {
     default_koalabear_poseidon2_16()
 }
@@ -146,10 +152,8 @@ mod tests {
 
     /// 复刻 vg-domain `commitment_parts_golden_vector` 的黄金 Note。
     fn golden_note() -> Note {
-        let owner = H::from_hex(
-            "1111111111111111111111111111111111111111111111111111111111111111",
-        )
-        .unwrap();
+        let owner = H::from_hex("1111111111111111111111111111111111111111111111111111111111111111")
+            .unwrap();
         let mut secret = [0u8; 32];
         secret[0] = 0x22;
         let mut salt = [0u8; 16];
@@ -166,9 +170,7 @@ mod tests {
 
     /// 黄金 Note 的 6 词前像（与 vg-domain golden vector 逐字一致）。
     fn golden_parts() -> Vec<[u8; 32]> {
-        let word = |hex: &str| -> [u8; 32] {
-            hex::decode(hex).unwrap().try_into().unwrap()
-        };
+        let word = |hex: &str| -> [u8; 32] { hex::decode(hex).unwrap().try_into().unwrap() };
         vec![
             word("a4c41c2383a5fd0b250bce28a902ebfb3480349f8714a9232a3dd279831f061d"),
             word("0ac2d6796d51fb5318755791b4b3e1e9180d58e74167ea2a71c81b4cbe41be52"),
@@ -182,7 +184,9 @@ mod tests {
     #[test]
     fn to_field_le_maps_limb_wise() {
         // 全零 → 全零域元素
-        assert!(to_field_le(&[0u8; 32]).iter().all(|e| e.as_canonical_u32() == 0));
+        assert!(to_field_le(&[0u8; 32])
+            .iter()
+            .all(|e| e.as_canonical_u32() == 0));
         // 低 4 字节 = 0x01000000（小端 limb[0] = 1）
         let mut b = [0u8; 32];
         b[0] = 1;
@@ -265,9 +269,6 @@ mod tests {
             },
         )
         .unwrap();
-        assert_ne!(
-            other.commitment(&PoseidonNoteHasher),
-            via_trait
-        );
+        assert_ne!(other.commitment(&PoseidonNoteHasher), via_trait);
     }
 }
