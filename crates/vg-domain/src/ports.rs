@@ -25,10 +25,18 @@ pub trait NoteHasher: Send + Sync {
     fn note_commitment(&self, parts: &[[u8; 32]]) -> Hash32;
 }
 
-/// 域元素（KoalaBear 域，p3-poseidon2/Plonky3 侧使用）。
+/// 域元素载体（KoalaBear 域，p3-poseidon2/Plonky3 侧使用）。
 ///
 /// 规范为 32 字节**小端**编码；值的域合法性（是否落在素域内）由 Prover
 /// 侧校验，领域层不做业务校验。newtype 与 [`Hash32`] 区分以防混用。
+///
+/// **32 字节 → KoalaBear 域元素的规范映射**：KoalaBear 素数约 2^64，单个
+/// 32 字节值不是单域元素。Task 10（NoteHasher 实现）与 Task 11（电路）中，
+/// 每个 32 字节值按确定性映射拆分为 **4 个连续小端 64-bit limb**
+/// （不做归约/拒绝），即 b[0..32] → u64_le(b[0..8]) .. u64_le(b[24..32])；
+/// 该拆分只存在于 hash/电路内部且两侧必须完全一致（与
+/// [`Note::commitment_parts`](crate::privacy::Note::commitment_parts) 的
+/// 编码规范互为配套）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FieldElement([u8; 32]);
 
@@ -85,7 +93,7 @@ impl<'de> Deserialize<'de> for FieldElement {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum LedgerItem {
-    /// Note 承诺（Shileded 交易的 note commitment）。
+    /// Note 承诺（Shielded 交易的 note commitment）。
     Commitment(Hash32),
     /// 已消费 nullifier（防双花）。
     Nullifier(Hash32),
