@@ -35,6 +35,9 @@ pub mod ports {
         type Context: Send;
 
         /// 插入新 Intent；主键冲突（同 id 已存在）返回 [`DomainError::AlreadyExists`]。
+        ///
+        /// 防重放的 `(actor, nonce)` 唯一性约束由 PostgreSQL 适配层承担
+        /// （数据库层唯一索引），领域端口仅按 id 幂等。
         async fn insert(
             &self,
             ctx: &mut Self::Context,
@@ -49,6 +52,10 @@ pub mod ports {
         ) -> Result<Option<Intent>, DomainError>;
 
         /// 更新指定 Intent 的状态（调用方负责先经 [`Intent::advance`] 裁决合法边）。
+        ///
+        /// 本方法**仅持久化 status 字段**；`rejection` / `result_ref` 的持久化
+        /// 由后续任务（Task 19/17）补全（save 全量或专用更新方法），调用方当前
+        /// 不得依赖二者落库。
         async fn update_status(
             &self,
             ctx: &mut Self::Context,
@@ -57,6 +64,9 @@ pub mod ports {
         ) -> Result<(), DomainError>;
 
         /// 列出全部非终态 Intent（供管道调度轮询推进）。
+        ///
+        /// 返回**所有**非终态（含已过期但未推进的项）；仓储不做时间假设，
+        /// 调用方须自行用 [`Intent::is_replay_safe`] 过滤。
         async fn list_pending(&self, ctx: &mut Self::Context) -> Result<Vec<Intent>, DomainError>;
     }
 }

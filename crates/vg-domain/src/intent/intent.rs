@@ -303,6 +303,10 @@ pub fn assert_transition(from: IntentStatus, to: IntentStatus) -> Result<(), Dom
 }
 
 /// Intent 聚合根：一次写请求的完整档案（动作、发起人、载荷与管道状态）。
+///
+/// `Deserialize` derive 仅供**受信任的存储重建 / 序列化往返**：它会绕过
+/// [`Intent::new`] 的不变量校验（payload 必须 object、`expires_at > created_at`），
+/// 不得用于外部输入的反序列化——外部输入必须走构造函数。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Intent {
     /// 唯一标识。
@@ -376,6 +380,10 @@ impl Intent {
 
     /// 按 §27 有向图推进状态；终态不可再变，非法跳转返回
     /// [`DomainError::InvalidTransition`]。
+    ///
+    /// 进入 `Rejected` 的推荐路径是 [`Intent::reject`]（会同时记录原因）；
+    /// 直接 `advance(Rejected)` 合法但**不设置** `rejection`（留空原因），
+    /// 管道引擎应优先使用 `reject()`。
     pub fn advance(&mut self, to: IntentStatus) -> Result<(), DomainError> {
         assert_transition(self.status, to)?;
         self.status = to;
