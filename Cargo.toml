@@ -14,6 +14,12 @@ chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 sha3 = "0.10"
 k256 = { version = "0.13", features = ["ecdsa", "arithmetic", "ecdh"] }
+# Plonky3 系列统一 0.7.0-rc.1（cargo search 已确认），勿混其他版本
+p3-koala-bear = "0.7.0-rc.1"
+p3-field = "0.7.0-rc.1"
+p3-poseidon2 = "0.7.0-rc.1"
+p3-symmetric = "0.7.0-rc.1"
+sha2 = "0.10"
 aes-gcm = "0.10"
 hkdf = "0.12"
 rand = "0.8"

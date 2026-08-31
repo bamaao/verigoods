@@ -15,6 +15,13 @@ impl Hash32 {
     /// 全零哈希，对应合约 `bytes32(0)` 哨兵语义。
     pub const ZERO: Hash32 = Hash32([0u8; 32]);
 
+    /// 由原始 32 字节构造（供 infra 侧哈希器实现封装原始摘要输出，
+    /// 与 [`FieldElement::from_bytes`](crate::ports::FieldElement::from_bytes)
+    /// 先例一致；无校验——构造方保证摘要来源合法）。
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// 从十六进制字符串解析；`0x` / `0X` 前缀可选接受。
     ///
     /// 解码后必须恰好为 32 字节（64 个 hex 字符），否则返回

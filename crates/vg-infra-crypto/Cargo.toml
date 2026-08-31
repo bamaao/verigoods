@@ -1,0 +1,20 @@
+[package]
+name = "vg-infra-crypto"
+version = "0.1.0"
+edition = "2021"
+description = "VeriGoods 隐私层密码学原语：secp256k1 密钥对/可恢复签名、隐匿地址、ECIES、Poseidon2 host-hash"
+
+[dependencies]
+vg-domain = { path = "../vg-domain" }
+k256 = { workspace = true }
+sha3 = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+p3-koala-bear = { workspace = true }
+p3-field = { workspace = true }
+p3-poseidon2 = { workspace = true }
+p3-symmetric = { workspace = true }
