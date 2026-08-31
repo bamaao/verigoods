@@ -16,15 +16,16 @@
 //! - [`commodity`]：商品：商品类型/批次/单品聚合与谱系；
 //! - [`ownership`]：所有权：所有权/保管分离模型、转移记录与端口；
 //! - [`policy`]：策略：监管域、策略引擎与 ABAC；
+//! - [`intent`]：Intent：唯一写入口径、状态机与风险分级；
 
 pub mod commodity;
 pub mod credential;
 pub mod identity;
+pub mod intent;
 pub mod lifecycle;
 pub mod ownership;
 pub mod policy;
 pub mod shared;
 
 // ---- 占位：以下上下文模块由后续任务添加 ----
-// pub mod intent;      // Intent：唯一写入口径
 // pub mod privacy;     // 隐私：票据、隐形地址
