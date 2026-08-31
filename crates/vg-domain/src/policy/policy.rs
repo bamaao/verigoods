@@ -60,7 +60,7 @@ pub struct VerifiedProofRef {
 pub type PolicyVersion = (PolicyId, u64);
 
 /// 策略裁决结果：记录本次迁移实际执行的策略版本集合。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyDecision {
     /// 生效执行的策略版本列表（每条被检核通过的适用策略一条）。
     pub enforced: Vec<PolicyVersion>,
@@ -519,5 +519,10 @@ mod tests {
         )
         .expect("全部满足应通过");
         assert_eq!(decision.enforced, vec![(PolicyId::new("pol-export"), 3)]);
+
+        // serde 往返：enforced 元组数组可序列化
+        let back: PolicyDecision =
+            serde_json::from_str(&serde_json::to_string(&decision).unwrap()).unwrap();
+        assert_eq!(back, decision);
     }
 }
