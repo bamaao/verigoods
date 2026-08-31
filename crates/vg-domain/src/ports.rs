@@ -30,11 +30,13 @@ pub trait NoteHasher: Send + Sync {
 /// 规范为 32 字节**小端**编码；值的域合法性（是否落在素域内）由 Prover
 /// 侧校验，领域层不做业务校验。newtype 与 [`Hash32`] 区分以防混用。
 ///
-/// **32 字节 → KoalaBear 域元素的规范映射**：KoalaBear 素数约 2^64，单个
-/// 32 字节值不是单域元素。Task 10（NoteHasher 实现）与 Task 11（电路）中，
-/// 每个 32 字节值按确定性映射拆分为 **4 个连续小端 64-bit limb**
-/// （不做归约/拒绝），即 b[0..32] → u64_le(b[0..8]) .. u64_le(b[24..32])；
-/// 该拆分只存在于 hash/电路内部且两侧必须完全一致（与
+/// **32 字节 → KoalaBear 域元素的规范映射**：KoalaBear 素数为 31-bit
+/// （p = 2^31 − 2^24 + 1，见 p3-koala-bear 0.7.0-rc.1），单个 32 字节值
+/// 不是单域元素。Task 10（NoteHasher 实现）与 Task 11（电路）中，每个
+/// 32 字节值按确定性映射拆分为 **8 个连续小端 32-bit limb**，即
+/// b[0..32] → u32_le(b[0..4]) .. u32_le(b[28..32])，每个 limb 经域的规范
+/// 归约（from_u64 语义）载入；该拆分只存在于 hash/电路内部且两侧必须
+/// 完全一致（与
 /// [`Note::commitment_parts`](crate::privacy::Note::commitment_parts) 的
 /// 编码规范互为配套）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
