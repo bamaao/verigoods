@@ -60,7 +60,10 @@ pub enum CryptoError {
 }
 
 /// keccak-256（EVM 变体，与 `vg_domain::shared::Hash32::keccak` 一致）。
-pub(crate) fn keccak256(data: &[u8]) -> [u8; 32] {
+///
+/// pub 化供 vg-infra-zk 复算 Poseidon2 域分隔标签（跨 crate 共用同一
+/// 口径，勿在别处重复实现）。
+pub fn keccak256(data: &[u8]) -> [u8; 32] {
     use sha3::Digest;
     let mut h = sha3::Keccak256::new();
     h.update(data);
