@@ -2,6 +2,8 @@
 -- 约定：主键一律 text（ID 为字符串）；金额/数量/计数 bigint（u64 口径）；
 -- 时间 timestamptz；哈希一律 bytea 存原始 32 字节（hex 转换属仓储层）。
 -- CHECK 白名单取自 vg-domain 各枚举的 snake_case 序列化值全集。
+-- 迁移纪律：已合入的迁移不可再改（sqlx checksum 锁定）；schema 变更 =
+-- 新增 000N 迁移文件；开发库重置 = dropdb + createdb + migrate()。
 
 -- ============================================================
 -- 身份上下文（identity）
@@ -12,8 +14,9 @@
 CREATE TABLE IF NOT EXISTS dids (
     id          text PRIMARY KEY,
     kind        text NOT NULL CHECK (kind IN ('enterprise','consumer','regulator','inspector','logistics','agent','device')),
-    -- 智能体挂靠的企业主体；非 agent 为 NULL
-    parent_did  text REFERENCES dids(id) ON DELETE CASCADE,
+    -- 智能体挂靠的企业主体；非 agent 为 NULL。RESTRICT：删企业不得连带
+    -- 抹掉 agent DID 及其能力/方法（历史不可变性优先，取值改软删除）
+    parent_did  text REFERENCES dids(id) ON DELETE RESTRICT,
     jurisdiction text NOT NULL,
     created_at  timestamptz NOT NULL,
     -- agent 必须有挂靠，非 agent 禁止挂靠（防嵌套委托由领域层守卫）
@@ -21,7 +24,9 @@ CREATE TABLE IF NOT EXISTS dids (
 );
 
 -- 表：验证方法。公钥摘要 = keccak(33 字节压缩 sec1)，32 字节 bytea。
--- 随主体级联删除；PK(did, method_id) 保证文档内唯一。
+-- PK(did, method_id) 保证文档内唯一。CASCADE：主体自身被删时随之清理
+-- 合理（密钥绑定随身份消亡）；但 RESTRICT 的 parent_did 使主体删除
+-- 实际上很难发生，此级联路径属兜底。
 CREATE TABLE IF NOT EXISTS verification_methods (
     did         text NOT NULL REFERENCES dids(id) ON DELETE CASCADE,
     method_id   text NOT NULL,
@@ -31,8 +36,10 @@ CREATE TABLE IF NOT EXISTS verification_methods (
     PRIMARY KEY (did, method_id)
 );
 
--- 表：能力授权。PK(agent_did, action) 使一个动作至多一条有效授权记录；
--- 随主体级联删除。action 白名单 = identity::Action 10 值全集。
+-- 表：能力授权。PK(agent_did, action) 使一个动作至多一条有效授权记录。
+-- CASCADE：授权依附主体，主体删除时随之清理（主体删除本身已被
+-- parent_did RESTRICT 严控，此级联属兜底）。action 白名单 =
+-- identity::Action 10 值全集。
 CREATE TABLE IF NOT EXISTS capabilities (
     agent_did   text NOT NULL REFERENCES dids(id) ON DELETE CASCADE,
     action      text NOT NULL CHECK (action IN (
@@ -78,14 +85,16 @@ CREATE TABLE IF NOT EXISTS products (
     id            text PRIMARY KEY,
     category      text NOT NULL CHECK (category <> ''),
     metadata_hash bytea NOT NULL CHECK (octet_length(metadata_hash) = 32),
+    created_at    timestamptz NOT NULL,
     active        boolean NOT NULL DEFAULT true
 );
 
 -- 表：批次。谱系不建列——父子关系走 batch_lineage 边表。
+-- product_id RESTRICT：删产品不得抹掉批次审计链（下架走 active 软删）。
 -- state 白名单 = LifecycleState 13 值全集（与 assets.state 同一状态机）。
 CREATE TABLE IF NOT EXISTS batches (
     id            text PRIMARY KEY,
-    product_id    text NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    product_id    text NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
     quantity      bigint NOT NULL CHECK (quantity > 0),
     unit          text NOT NULL CHECK (unit <> ''),
     produced_at   timestamptz NOT NULL,
@@ -112,7 +121,8 @@ CREATE INDEX IF NOT EXISTS idx_batch_lineage_child ON batch_lineage(child);
 -- 表：单品资产。transfer_count/c2c_count 由所有权上下文回填。
 CREATE TABLE IF NOT EXISTS assets (
     id                      text PRIMARY KEY,
-    product_id              text NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    -- RESTRICT 理由同 batches.product_id：审计链不可被产品删除抹掉
+    product_id              text NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
     manufacturer            text NOT NULL,
     authenticity_commitment bytea NOT NULL CHECK (octet_length(authenticity_commitment) = 32),
     created_at              timestamptz NOT NULL,
@@ -197,7 +207,8 @@ CREATE TABLE IF NOT EXISTS policies (
 -- ============================================================
 
 -- 表：意图管道。幂等两层：PK(id) 冲突 + (actor, nonce) UNIQUE 防重放
--- （Task 8 审查确定的约束）。action/status/risk 白名单分别为
+-- （Task 8 审查确定的约束）。updated_at 由仓储层在每次状态变更时显式
+-- 更新（无触发器）。action/status/risk 白名单分别为
 -- IntentAction 13 值 / IntentStatus 12 值 / RiskLevel 4 值全集。
 CREATE TABLE IF NOT EXISTS intents (
     id           text PRIMARY KEY,
@@ -250,6 +261,8 @@ CREATE INDEX IF NOT EXISTS idx_nullifiers_intent ON nullifiers(intent_id);
 
 -- 表：Shielded 交易记录。nf/commitment 各自 UNIQUE 约束消费与产生两侧
 -- 的幂等；extra 为监管可解密文（EncryptedExtraData 原始字节）。
+-- 与 notes/nullifiers 无 FK：隐私表刻意与明文侧解耦，一致性由应用层
+-- 同一事务写入保证。
 CREATE TABLE IF NOT EXISTS shielded_txs (
     serial     bigserial PRIMARY KEY,
     nf         bytea NOT NULL UNIQUE CHECK (octet_length(nf) = 32),
@@ -304,8 +317,10 @@ CREATE TABLE IF NOT EXISTS audit_events (
     intent_id      text,
     action         text NOT NULL,
     resource       text NOT NULL,
-    -- 策略版本引用，形如 "(policy_id, version)" 或 JSON；由仓储层编码
-    policy_version text,
+    -- 决策时命中的策略版本（(policy_id, policy_version) 二元组的拆列形；
+    -- 未命中策略时均为 NULL）
+    policy_id      text,
+    policy_version bigint,
     proof_id       text,
     result         text NOT NULL,
     at             timestamptz NOT NULL DEFAULT now()

@@ -90,56 +90,83 @@ mod tests {
             "幂等索引应为带 WHERE 的唯一索引：{def}"
         );
 
-        // 抽查：CHECK 白名单生效（非法 lifecycle 状态应被拒绝）
-        let bad_state = sqlx::query(
-            "INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) \
-             VALUES ('t-bad', 't-p', 1, 'kg', now(), 't-did', 'teleported')",
-        )
-        .execute(&pool)
-        .await;
-        assert!(bad_state.is_err(), "非法 lifecycle 状态应违反 CHECK");
-
-        // 抽查：batch_lineage.op 三种合法值（split/merge/transform）均可入库，
-        // 且非法 op 被拒。事务内执行并回滚，保证测试幂等可重跑。
+        // 抽查：CHECK 白名单与谱系 op 合法值。全部在事务内执行并回滚，
+        // 保证测试幂等可重跑。非法值用例先插入合法产品/父批次，确保
+        // 失败只能归因于 CHECK 本身（排除 FK 混淆），并以错误文本断言语义。
         let mut tx = pool.begin().await.expect("开启事务应成功");
-        sqlx::query("INSERT INTO products (id, category, metadata_hash) VALUES ('t-prod-parent', 'milk', decode(repeat('ab', 32), 'hex'))")
+        sqlx::query("INSERT INTO products (id, category, metadata_hash, created_at) VALUES ('t-prod', 'milk', decode(repeat('ab', 32), 'hex'), now())")
             .execute(&mut *tx)
             .await
-            .expect("插入父产品应成功");
-        sqlx::query("INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) VALUES ('t-parent', 't-prod-parent', 1, 'kg', now(), 't-did', 'created')")
+            .expect("插入产品应成功");
+        sqlx::query("INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) VALUES ('t-parent', 't-prod', 1, 'kg', now(), 't-did', 'created')")
             .execute(&mut *tx)
             .await
             .expect("插入父批次应成功");
-        for (parent, child, op) in [
-            ("t-parent", "t-split", "split"),
-            ("t-parent", "t-merge", "merge"),
-            ("t-parent", "t-transform", "transform"),
-        ] {
-            sqlx::query("INSERT INTO products (id, category, metadata_hash) VALUES ($1, 'milk', decode(repeat('ab', 32), 'hex'))")
-                .bind(format!("t-prod-{child}"))
-                .execute(&mut *tx)
-                .await
-                .expect("插入产品应成功");
-            sqlx::query("INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) VALUES ($1, $2, 1, 'kg', now(), 't-did', 'created')")
+
+        // 非法 lifecycle 状态：产品/批次前置已满足，失败必为 CHECK。
+        // 错误会中止外层事务，故用 SAVEPOINT 包裹后回滚到该点。
+        sqlx::query("SAVEPOINT neg_state")
+            .execute(&mut *tx)
+            .await
+            .expect("建立 savepoint 应成功");
+        let bad_state = sqlx::query(
+            "INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) \
+             VALUES ('t-bad', 't-prod', 1, 'kg', now(), 't-did', 'teleported')",
+        )
+        .execute(&mut *tx)
+        .await;
+        sqlx::query("ROLLBACK TO SAVEPOINT neg_state")
+            .execute(&mut *tx)
+            .await
+            .expect("回滚 savepoint 应成功");
+        match bad_state {
+            Err(e) => assert!(
+                e.to_string().contains("check constraint"),
+                "非法 lifecycle 状态应违反 CHECK，实际错误：{e}"
+            ),
+            Ok(_) => panic!("非法 lifecycle 状态应被拒绝"),
+        }
+
+        // 合法谱系 op（split/merge/transform，LineageOp 全集）逐一入库
+        for (child, op) in [("t-split", "split"), ("t-merge", "merge"), ("t-transform", "transform")] {
+            sqlx::query("INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) VALUES ($1, 't-prod', 1, 'kg', now(), 't-did', 'created')")
                 .bind(child)
-                .bind(format!("t-prod-{child}"))
                 .execute(&mut *tx)
                 .await
-                .expect("插入批次应成功");
-            sqlx::query("INSERT INTO batch_lineage (parent, child, op) VALUES ($1, $2, $3)")
-                .bind(parent)
+                .expect("插入子批次应成功");
+            sqlx::query("INSERT INTO batch_lineage (parent, child, op) VALUES ('t-parent', $1, $2)")
                 .bind(child)
                 .bind(op)
                 .execute(&mut *tx)
                 .await
                 .unwrap_or_else(|e| panic!("合法谱系 op {op} 应通过 CHECK：{e}"));
         }
+        // 非法 op：父子批次均已存在（避免 PK/FK 混淆），失败必为 CHECK；
+        // 同样以 SAVEPOINT 包裹以继续外层事务
+        sqlx::query("INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) VALUES ('t-op-bad', 't-prod', 1, 'kg', now(), 't-did', 'created')")
+            .execute(&mut *tx)
+            .await
+            .expect("插入用例批次应成功");
+        sqlx::query("SAVEPOINT neg_op")
+            .execute(&mut *tx)
+            .await
+            .expect("建立 savepoint 应成功");
         let bad_op = sqlx::query(
-            "INSERT INTO batch_lineage (parent, child, op) VALUES ('t-parent', 't-bad', 'fission')",
+            "INSERT INTO batch_lineage (parent, child, op) VALUES ('t-parent', 't-op-bad', 'fission')",
         )
         .execute(&mut *tx)
         .await;
-        assert!(bad_op.is_err(), "非法谱系 op 应违反 CHECK");
+        sqlx::query("ROLLBACK TO SAVEPOINT neg_op")
+            .execute(&mut *tx)
+            .await
+            .expect("回滚 savepoint 应成功");
+        match bad_op {
+            Err(e) => assert!(
+                e.to_string().contains("check constraint"),
+                "非法谱系 op 应违反 CHECK，实际错误：{e}"
+            ),
+            Ok(_) => panic!("非法谱系 op 应被拒绝"),
+        }
         tx.rollback().await.expect("回滚应成功");
     }
 }
