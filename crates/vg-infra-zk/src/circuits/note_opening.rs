@@ -9,7 +9,8 @@
 //!   零补齐），由 [`prove_note_opening`] 从 parts 电路外展开：n 词展开为
 //!   8n + 8 limb = n + 1 个吸收块，黄金 6 词即 56 limb = 7 块。
 //!
-//! 黄金锚点：vg-domain 黄金 Note 的 6 词前像 → C =
+//! 黄金锚点：黄金 Note 的 6 词前像（与 vg-domain 黄金向量一致，
+//! hex 字面复刻）→ C =
 //! `a161d8663eae644891afc05c9c9b4b42c7100a4d04e5882a48835b4c5e0f857d`
 //! （见本文件测试 `golden_note_proves_and_verifies`）。
 //!
@@ -35,7 +36,10 @@
 //!    起始，4 初始全轮（+rc → x³ → 外部线性层 → assert post）、20 部分轮
 //!    （state[0] +rc → x³ → assert post_sbox → 内部线性层）、4 终末全轮；
 //!    `ending_full_rounds[3].post` 即该行置换输出；
-//! 2. **t 布尔**（所有行）：`t * (t - 1) = 0`；首行 `t = 0`，末行 `t = 1`；
+//! 2. **t 布尔**（所有行）：`t * (t - 1) = 0`；**首行 `t = 0`**（关键
+//!    soundness 约束：若允许 t 从首行即 1，则 g = t_next - t_local 恒
+//!    为 0，start 行的 label 锚定守卫全部失效，攻击者可从自由首状态
+//!    伪造 publics==C 的证明）、末行 `t = 1`；
 //! 3. **单调**（转移）：`t_local - t_local * t_next = 0`，故
 //!    `g = t_next - t_local` 是唯一的 0→1 指示子（start 行进入标志）；
 //! 4. **链式吸收**（转移，g = 0 时）：rate 槽
@@ -45,11 +49,13 @@
 //!    label limb，常量）、`inputs_next[8..16] = 0`；
 //! 6. **公开绑定**（末行）：`post[0..8] = publics[0..8]`。
 //!
-//! 可靠性论证：末行输出沿链式约束回溯到唯一 start 行（label 初始化），
-//! 因此证明通过 ⟺ prover 知道一条从 label 起、以 rate = C 结尾的吸收
-//! 块序列（即 C 的填充前像；6 词 note 结构由 host 侧见证构造保证，
-//! 电路层面块内容为自由见证——如需电路内强制 sentinel 结构可在
-//! Task 12 扩展 block 列约束）。
+//! 可靠性论证：首行 t = 0 与末行 t = 1 加上 t 单调布尔，迫使存在唯一
+//! 的 0→1 转移（start 行）；末行输出沿链式约束回溯到该 start 行
+//! （label 初始化），因此证明通过 ⟺ prover 知道一条从 label 起、以
+//! rate = C 结尾的吸收块序列（即 C 的填充前像；6 词 note 结构由
+//! host 侧见证构造保证，电路层面块内容为自由见证——如需电路内强制
+//! sentinel 结构可在 Task 12 扩展 block 列约束）。回归测试
+//! `malicious_t_equivalent_one_trace_rejected` 锁定该攻击面已封。
 //!
 //! ## STARK 配置（非零知识，见 crate 根文档诚实边界）
 //!
@@ -251,6 +257,10 @@ where
         // 2. t 布尔（所有行，仅 local）
         let t_local: AB::Expr = local[T_COL].into();
         builder.assert_zero(t_local.clone() * (t_local.clone() - KoalaBear::from_int(1u32)));
+        // 首行 t = 0（关键：封死「t≡1 使 g 全为 0、label 锚定失效」的
+        // 伪造链攻击——没有此约束，攻击者可令全部转移的 start 守卫
+        // 失效，从自由首状态逐行反解出 publics==C 的伪证）
+        builder.when_first_row().assert_zero(local[T_COL]);
 
         // 6. 公开绑定 + 末行 t = 1（先拷贝 publics 以结束不可变借用）
         let publics: [AB::PublicVar; RATE] = builder.public_values()[..RATE]
@@ -545,7 +555,8 @@ mod tests {
     use std::time::Instant;
     use vg_infra_crypto::poseidon::poseidon_note_commitment;
 
-    /// 黄金 Note 的 6 词前像（与 vg-domain / vg-infra-crypto fixture 逐字一致）。
+    /// 黄金 Note 的 6 词前像（与 vg-domain 黄金向量一致，hex 字面复刻；
+/// 与 vg-infra-crypto fixture 逐字一致）。
     fn golden_parts() -> Vec<[u8; 32]> {
         let word = |hex: &str| -> [u8; 32] { hex::decode(hex).unwrap().try_into().unwrap() };
         vec![
@@ -673,6 +684,71 @@ mod tests {
             *b ^= 0xFF;
         }
         assert!(!verify_note_opening(&output));
+    }
+
+    /// 恶意 trace 回归：封堵「t≡1 伪造链」攻击（首行 t=0 约束）。
+    ///
+    /// 攻击面：修复前若 t 允许从首行即 1，则 g = t_next - t_local 恒为 0，
+    /// 所有 start 行 label 锚定守卫（g*(...)）失效，首行 inputs 完全自由
+    /// ——由置换可逆性可逐行反解并以自由 block 吸收差值，在不知前像的
+    /// 情况下伪造 publics==C 的证明（height=1 时平凡成立）。
+    ///
+    /// 构造：height=1 的「完美」恶意 trace——置换列全真（generate_trace_rows
+    /// 从任意输入生成）、block 全零、t=1、publics 取该行真实输出（即一个
+    /// 修复前可通过全部约束的伪证），喂给 p3_air::check_constraints（与
+    /// prove 内 DebugConstraintBuilder 同一条逐行约束校验路径），断言被拒。
+    #[test]
+    fn malicious_t_equivalent_one_trace_rejected() {
+        use p3_air::check_constraints;
+
+        // 单行 trace：置换输入任意（攻击者自选），其余列按攻击者最优填法。
+        let attacker_input = [KoalaBear::from_int(0x12345678u32); WIDTH];
+        let air = NoteOpeningAir::new();
+        let perm_matrix = generate_trace_rows::<
+            KoalaBear,
+            GenericPoseidon2LinearLayersKoalaBear,
+            WIDTH,
+            SBOX_DEGREE,
+            SBOX_REGISTERS,
+            HALF_FULL_ROUNDS,
+            PARTIAL_ROUNDS,
+        >(vec![attacker_input], &air.constants, 0);
+
+        let mut values = perm_matrix.values.clone();
+        values.extend_from_slice(&[KoalaBear::from_int(0u32); RATE]); // block 全零
+        values.push(KoalaBear::from_int(1u32)); // t = 1（恶意：首行即 1）
+        let trace = RowMajorMatrix::new(values, TOTAL_COLS);
+
+        // publics 取该行真实输出 rate 槽（末行公开绑定因此满足）。
+        let perm_cols: &Poseidon2Cols<
+            KoalaBear,
+            WIDTH,
+            SBOX_DEGREE,
+            SBOX_REGISTERS,
+            HALF_FULL_ROUNDS,
+            PARTIAL_ROUNDS,
+        > = trace.values[..PERM_COLS].borrow();
+        let publics: Vec<KoalaBear> =
+            perm_cols.ending_full_rounds[HALF_FULL_ROUNDS - 1].post[..RATE].to_vec();
+
+        // 约束校验必须失败（首行 t=0 违规；修复前此 trace 通过全部约束）
+        let result = std::panic::catch_unwind(|| {
+            check_constraints(&air, &trace, &publics);
+        });
+        assert!(
+            result.is_err(),
+            "t≡1 单行伪证必须被首行 t=0 约束拒绝"
+        );
+    }
+
+    /// 对照组：诚实 witness 必须通过同一条 debug 约束校验路径。
+    #[test]
+    fn honest_witness_passes_constraint_check() {
+        use p3_air::check_constraints;
+        let witness = build_witness(&golden_parts()).expect("见证构造应成功");
+        let publics: Vec<KoalaBear> = witness.publics.to_vec();
+        let air = NoteOpeningAir::new();
+        check_constraints(&air, &witness.trace, &publics);
     }
 
     /// AIR 见证与 host 置换的一致性（不走证明，快速回归）：

@@ -5,7 +5,6 @@ edition = "2021"
 description = "VeriGoods 隐私层 ZK 电路：Plonky3 (p3-uni-stark) note_opening 承诺开启证明"
 
 [dependencies]
-vg-domain = { path = "../vg-domain" }
 vg-infra-crypto = { path = "../vg-infra-crypto" }
 thiserror = { workspace = true }
 hex = { workspace = true }
