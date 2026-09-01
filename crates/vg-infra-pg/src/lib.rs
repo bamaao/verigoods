@@ -12,20 +12,35 @@
 //! - [`credential_repo`]：可验证凭证（Task 15）；
 //! - [`commodity_repo`]：商品类型 / 批次 / 单品 / 谱系（Task 16）；
 //! - [`ownership_repo`]：所有权 / 保管 / 转移流水（Task 16）；
-//! - [`lifecycle_repo`]：生命周期事件日志（Task 16）。
+//! - [`lifecycle_repo`]：生命周期事件日志（Task 16）；
+//! - [`policy_repo`]：监管域 / 策略版本（Task 17）；
+//! - [`intent_repo`]：意图管道（Task 17）；
+//! - [`proof_store`]：ZK 证明存档（Task 17，Task 19/20 使用）；
+//! - [`audit`]：审计事件写入，只增（Task 17）；
+//! - [`outbox`]：领域事件 outbox（Task 17，Task 23 索引器消费）。
 
+pub mod audit;
 pub mod commodity_repo;
 pub mod credential_repo;
 pub mod identity_repo;
+pub mod intent_repo;
 pub mod lifecycle_repo;
+pub mod outbox;
 pub mod ownership_repo;
+pub mod policy_repo;
 pub mod pool;
+pub mod proof_store;
 
+pub use audit::{AuditEntry, PgAuditWriter};
 pub use commodity_repo::PgCommodityRepo;
 pub use credential_repo::PgCredentialRepo;
 pub use identity_repo::PgIdentityRepo;
+pub use intent_repo::PgIntentRepository;
 pub use lifecycle_repo::PgLifecycleRepo;
+pub use outbox::{OutboxEntry, PgOutbox};
 pub use ownership_repo::PgOwnershipRepo;
+pub use policy_repo::PgPolicyRepository;
+pub use proof_store::{PgProofStore, ProofRecord};
 
 /// sqlx 错误 → 领域存储错误的统一映射。
 ///
