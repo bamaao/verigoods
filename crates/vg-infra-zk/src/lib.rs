@@ -26,6 +26,10 @@ pub use circuits::note_opening::{
     prove_note_opening, verify_note_opening, ProofOutput, NOTE_OPENING_CIRCUIT_ID,
     NOTE_OPENING_CIRCUIT_VERSION,
 };
+pub use circuits::range_check::{
+    prove_range_check, range_commitment, range_commitment_parts, verify_range_check,
+    RangeProofOutput, RANGE_CHECK_CIRCUIT_ID, RANGE_CHECK_CIRCUIT_VERSION,
+};
 
 /// ZK 电路统一错误。
 ///
