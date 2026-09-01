@@ -24,6 +24,7 @@ pub mod commodity_repo;
 pub mod credential_repo;
 pub mod identity_repo;
 pub mod intent_repo;
+pub mod ledger_inprocess;
 pub mod lifecycle_repo;
 pub mod outbox;
 pub mod ownership_repo;
@@ -36,6 +37,7 @@ pub use commodity_repo::PgCommodityRepo;
 pub use credential_repo::PgCredentialRepo;
 pub use identity_repo::PgIdentityRepo;
 pub use intent_repo::PgIntentRepository;
+pub use ledger_inprocess::InProcessLedger;
 pub use lifecycle_repo::PgLifecycleRepo;
 pub use outbox::{OutboxEntry, PgOutbox};
 pub use ownership_repo::PgOwnershipRepo;
@@ -168,6 +170,7 @@ mod tests {
         "domain_events",
         "intents",
         "ledger_anchors",
+        "ledger_state",
         "lifecycle_events",
         "notes",
         "nullifiers",
