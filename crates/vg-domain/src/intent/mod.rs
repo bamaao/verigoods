@@ -58,6 +58,12 @@ pub mod ports {
         /// 供 reject(reason)/confirm(result_ref) 后的落库路径；upsert 语义：
         /// id 已存在时更新全部可变字段（status/risk/payload/nonce/expires_at/
         /// rejection/result_ref/updated_at），created_at 保留首建值。
+        ///
+        /// **陈旧快照契约**：调用方须保证 intent 是本事务内经
+        /// [`IntentRepository::get`] 读出的实例、经领域方法推进后的结果；
+        /// save 不做乐观并发防护（无 version 列），陈旧快照写入会**静默
+        /// 覆盖**他人在此期间的推进。另 actor/nonce 不可变，篡改将触发
+        /// UNIQUE 约束中止事务。
         async fn save(
             &self,
             ctx: &mut Self::Context,

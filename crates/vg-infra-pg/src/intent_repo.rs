@@ -196,6 +196,9 @@ impl IntentRepository for PgIntentRepository {
     /// **含已过期但未推进的项**：仓储不做时间假设，调用方须自行用
     /// [`Intent::is_replay_safe`] 过滤（领域端口契约）。
     /// `ORDER BY created_at, id` 保证推进顺序确定（同 created_at 以 id 决胜）。
+    ///
+    /// **量级假设**：Phase1 无分页，假设非终态为管道工作集（少数）；
+    /// 若终态堆积致大表，需补 LIMIT + 游标分页。
     async fn list_pending(&self, ctx: &mut Self::Context) -> Result<Vec<Intent>, DomainError> {
         let rows = sqlx::query(
             "SELECT id, action, actor, on_behalf_of, payload::text AS payload, nonce, \

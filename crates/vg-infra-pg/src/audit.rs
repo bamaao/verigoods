@@ -9,6 +9,10 @@ use chrono::{DateTime, Utc};
 use vg_domain::shared::{Did, DomainError};
 
 /// 审计条目（infra 侧定义；at 为业务时刻，落库列 `at`）。
+///
+/// **词表约定**（写入方 Task 19 / 查询方 Task 24 共同遵守）：
+/// `action` 取 `IntentAction` 13 值的 snake_case 全集；`result` 仅取
+/// `allow` / `deny` 二值。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditEntry {
     /// 操作主体。

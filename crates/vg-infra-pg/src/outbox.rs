@@ -62,6 +62,12 @@ impl PgOutbox {
     }
 
     /// 拉取最多 `limit` 条待投递条目，按 serial 升序（投递顺序即落库顺序）。
+    ///
+    /// **多消费者安全**：查询带 `FOR UPDATE SKIP LOCKED`——并发投递器各自
+    /// 拉到不相交的行集（已被他事务锁定的行跳过而非阻塞）；行锁在事务
+    /// 上下文内生效、随提交/回滚释放，故 mark_dispatched 须在同一事务内
+    /// 完成以独占该批条目。与 LIMIT 组合下 PostgreSQL 保证先锁序再截断，
+    /// 不会因锁等待扩大批次。
     pub async fn pending(
         &self,
         ctx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
@@ -69,7 +75,8 @@ impl PgOutbox {
     ) -> Result<Vec<OutboxEntry>, DomainError> {
         let rows = sqlx::query(
             "SELECT id, aggregate, payload::text AS payload, created_at \
-             FROM domain_events WHERE NOT dispatched ORDER BY id ASC LIMIT $1",
+             FROM domain_events WHERE NOT dispatched \
+             ORDER BY id ASC LIMIT $1 FOR UPDATE SKIP LOCKED",
         )
         .bind(limit)
         .fetch_all(&mut **ctx)
