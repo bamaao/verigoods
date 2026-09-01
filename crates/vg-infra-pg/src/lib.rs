@@ -98,5 +98,48 @@ mod tests {
         .execute(&pool)
         .await;
         assert!(bad_state.is_err(), "非法 lifecycle 状态应违反 CHECK");
+
+        // 抽查：batch_lineage.op 三种合法值（split/merge/transform）均可入库，
+        // 且非法 op 被拒。事务内执行并回滚，保证测试幂等可重跑。
+        let mut tx = pool.begin().await.expect("开启事务应成功");
+        sqlx::query("INSERT INTO products (id, category, metadata_hash) VALUES ('t-prod-parent', 'milk', decode(repeat('ab', 32), 'hex'))")
+            .execute(&mut *tx)
+            .await
+            .expect("插入父产品应成功");
+        sqlx::query("INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) VALUES ('t-parent', 't-prod-parent', 1, 'kg', now(), 't-did', 'created')")
+            .execute(&mut *tx)
+            .await
+            .expect("插入父批次应成功");
+        for (parent, child, op) in [
+            ("t-parent", "t-split", "split"),
+            ("t-parent", "t-merge", "merge"),
+            ("t-parent", "t-transform", "transform"),
+        ] {
+            sqlx::query("INSERT INTO products (id, category, metadata_hash) VALUES ($1, 'milk', decode(repeat('ab', 32), 'hex'))")
+                .bind(format!("t-prod-{child}"))
+                .execute(&mut *tx)
+                .await
+                .expect("插入产品应成功");
+            sqlx::query("INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) VALUES ($1, $2, 1, 'kg', now(), 't-did', 'created')")
+                .bind(child)
+                .bind(format!("t-prod-{child}"))
+                .execute(&mut *tx)
+                .await
+                .expect("插入批次应成功");
+            sqlx::query("INSERT INTO batch_lineage (parent, child, op) VALUES ($1, $2, $3)")
+                .bind(parent)
+                .bind(child)
+                .bind(op)
+                .execute(&mut *tx)
+                .await
+                .unwrap_or_else(|e| panic!("合法谱系 op {op} 应通过 CHECK：{e}"));
+        }
+        let bad_op = sqlx::query(
+            "INSERT INTO batch_lineage (parent, child, op) VALUES ('t-parent', 't-bad', 'fission')",
+        )
+        .execute(&mut *tx)
+        .await;
+        assert!(bad_op.is_err(), "非法谱系 op 应违反 CHECK");
+        tx.rollback().await.expect("回滚应成功");
     }
 }

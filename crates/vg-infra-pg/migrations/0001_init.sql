@@ -103,8 +103,8 @@ CREATE INDEX IF NOT EXISTS idx_batches_product ON batches(product_id);
 CREATE TABLE IF NOT EXISTS batch_lineage (
     parent text NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
     child  text NOT NULL REFERENCES batches(id) ON DELETE CASCADE,
-    -- op：产生该边的操作（split / merge）
-    op     text NOT NULL CHECK (op IN ('split','merge')),
+    -- op 白名单 = LineageOp 3 值全集（serde snake_case）
+    op     text NOT NULL CHECK (op IN ('split','merge','transform')),
     PRIMARY KEY (parent, child)
 );
 CREATE INDEX IF NOT EXISTS idx_batch_lineage_child ON batch_lineage(child);
@@ -330,13 +330,14 @@ CREATE INDEX IF NOT EXISTS idx_domain_events_pending
 -- 账本锚定（LedgerPort 持久化侧）
 -- ============================================================
 
--- 表：账本锚。kind 白名单 = LedgerItem 8 类（含 Task 26 状态根）。
+-- 表：账本锚。kind 白名单 = LedgerItem 8 类的 serde tag 全集
+-- （encrypted_extra 对应 EncryptedExtraData；含 Task 26 状态根）。
 -- 部分唯一索引：commitment/nullifier 两类锚的 (kind, ref_hash) 幂等——
 -- 同一承诺/零花重复锚定直接违例，其余种类允许多次（如 transfer 流水）。
 CREATE TABLE IF NOT EXISTS ledger_anchors (
     id         bigserial PRIMARY KEY,
     kind       text NOT NULL CHECK (kind IN (
-        'commitment','nullifier','extra','transfer','credential_status',
+        'commitment','nullifier','encrypted_extra','transfer','credential_status',
         'lifecycle_change','policy_registered','state_root')),
     ref_hash   bytea NOT NULL CHECK (octet_length(ref_hash) = 32),
     payload    jsonb NOT NULL,
