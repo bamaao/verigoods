@@ -34,6 +34,7 @@ use vg_domain::ports::{
     CircuitSpec, FieldElement, ProofBundle, ProofProver, Witness,
 };
 use vg_domain::shared::DomainError;
+#[cfg(any(test, feature = "test-util"))]
 use vg_infra_crypto::keccak256;
 
 use crate::circuits::coldchain::{
@@ -84,13 +85,34 @@ fn map_zk_error(e: ZkError) -> DomainError {
     DomainError::InvalidInput(format!("ZK 证明失败：{e}"))
 }
 
-/// 断言两组公开输入逐元素相等（不一致 → InvalidInput）。
-fn check_publics(expected: &[u32], given: &[FieldElement]) -> Result<(), DomainError> {
+/// 断言两组公开输入逐元素相等（不一致 → InvalidInput，错误信息携带
+/// 电路 id@version 与首个失配位置）。
+fn check_publics(
+    circuit: &CircuitSpec,
+    expected: &[u32],
+    given: &[FieldElement],
+) -> Result<(), DomainError> {
     let given_limbs: Vec<u32> = given.iter().map(fe_to_u32).collect::<Result<_, _>>()?;
     if expected != given_limbs {
-        return Err(DomainError::InvalidInput(
-            "公开输入与电路计算结果不一致".into(),
-        ));
+        let pos = expected
+            .iter()
+            .zip(given_limbs.iter())
+            .position(|(a, b)| a != b);
+        let detail = match pos {
+            Some(i) => format!(
+                "publics[{i}] 不一致：期望 {:#x} 实得 {:#x}",
+                expected[i], given_limbs[i]
+            ),
+            None => format!(
+                "长度不一致：期望 {} 实得 {}",
+                expected.len(),
+                given_limbs.len()
+            ),
+        };
+        return Err(DomainError::InvalidInput(format!(
+            "电路 {}@{} {}",
+            circuit.id, circuit.version, detail
+        )));
     }
     Ok(())
 }
@@ -130,7 +152,7 @@ impl ProofProver for ProverDispatcher {
                     .collect();
                 let output = prove_note_opening(&parts).map_err(map_zk_error)?;
                 let publics = limbs_to_fes(&output.public_limbs);
-                check_publics(&output.public_limbs, &circuit.public_inputs)?;
+                check_publics(circuit, &output.public_limbs, &circuit.public_inputs)?;
                 Ok(ProofBundle {
                     circuit_id: circuit.id.clone(),
                     version: circuit.version,
@@ -190,7 +212,7 @@ impl ProofProver for ProverDispatcher {
                     fe_to_u32(fe)?;
                 }
                 let output = prove_range_check(x, &salt, bound).map_err(map_zk_error)?;
-                check_publics(&output.public_limbs, &circuit.public_inputs)?;
+                check_publics(circuit, &output.public_limbs, &circuit.public_inputs)?;
                 Ok(ProofBundle {
                     circuit_id: circuit.id.clone(),
                     version: circuit.version,
@@ -215,7 +237,7 @@ impl ProofProver for ProverDispatcher {
                 }
                 let t_max = fe_to_u32(&circuit.public_inputs[0])?;
                 let output = prove_coldchain(&readings, t_max).map_err(map_zk_error)?;
-                check_publics(&output.public_limbs, &circuit.public_inputs)?;
+                check_publics(circuit, &output.public_limbs, &circuit.public_inputs)?;
                 Ok(ProofBundle {
                     circuit_id: circuit.id.clone(),
                     version: circuit.version,
@@ -285,6 +307,7 @@ impl ProofProver for ProverDispatcher {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 /// 透明回执 Prover（**仅测试用**）。
 ///
 /// ## ⚠ 不具零知识性与可靠性
@@ -300,6 +323,7 @@ impl ProofProver for ProverDispatcher {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TransparentProver;
 
+#[cfg(any(test, feature = "test-util"))]
 impl TransparentProver {
     /// 规范化串：u32 len(id) LE ‖ id ‖ version u64 LE ‖ publics ‖ secrets。
     fn canonical(
@@ -319,6 +343,7 @@ impl TransparentProver {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
 #[async_trait]
 impl ProofProver for TransparentProver {
     async fn prove(

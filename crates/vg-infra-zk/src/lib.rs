@@ -35,7 +35,11 @@ pub use circuits::range_check::{
     prove_range_check, range_commitment, range_commitment_parts, verify_range_check,
     RangeProofOutput, RANGE_CHECK_CIRCUIT_ID, RANGE_CHECK_CIRCUIT_VERSION,
 };
-pub use dispatcher::{ProverDispatcher, TransparentProver};
+pub use dispatcher::ProverDispatcher;
+/// TransparentProver 仅在 `test-util` feature（或本 crate 自测试）下
+/// 存在——防生产 wiring 误接（无零知识性/可靠性，仅测试回执）。
+#[cfg(feature = "test-util")]
+pub use dispatcher::TransparentProver;
 
 /// ZK 电路统一错误。
 ///

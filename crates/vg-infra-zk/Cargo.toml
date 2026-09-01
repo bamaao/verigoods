@@ -24,3 +24,8 @@ p3-fri = { workspace = true }
 p3-merkle-tree = { workspace = true }
 p3-uni-stark = { workspace = true }
 postcard = { workspace = true }
+
+[features]
+# 暴露 TransparentProver 等仅测试用途的工具（默认关闭；下游 crate 以
+# dev-dependencies features = ["test-util"] 启用）。
+test-util = []

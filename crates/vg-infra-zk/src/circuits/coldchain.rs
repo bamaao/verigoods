@@ -949,6 +949,13 @@ mod tests {
         // publics = [T_max, root×8]
         assert_eq!(output.public_limbs[0], GOLDEN_T_MAX);
         assert_eq!(&output.public_limbs[1..], &golden_root_limbs());
+        // proof 体积哨兵（上链/存储口径参考）
+        println!("golden proof size: {} bytes", output.proof.len());
+        assert!(
+            output.proof.len() < 200_000,
+            "proof 体积 {} 超过上链/存储参考上限 200KB",
+            output.proof.len()
+        );
         println!("golden prove: {prove_secs:.2}s, verify: {verify_secs:.2}s");
     }
 
