@@ -925,7 +925,8 @@ pub fn prove_range_check(
 /// 验证 range_check 证明（publics 取 `output.public_limbs`）。
 ///
 /// 任何篡改（证明字节或公开 limb）返回 false，不 panic。预处理列的
-/// verifier key 由 `setup_preprocessed` 确定性重建（同一电路/配置）。
+/// verifier key 由 `setup_preprocessed` 确定性重建并经 `OnceLock`
+/// 缓存（AIR/config 全确定性，跨调用不变）。
 pub fn verify_range_check(output: &RangeProofOutput) -> bool {
     let Ok(proof) = postcard::from_bytes(&output.proof) else {
         return false;
@@ -937,9 +938,20 @@ pub fn verify_range_check(output: &RangeProofOutput) -> bool {
         .collect();
     let config = range_config();
     let air = RangeCheckAir::new();
-    let (_pp, vk) = setup_preprocessed(&config, &air, HEIGHT_LOG)
-        .expect("本 AIR 定义 7 列预处理列，setup 应返回 Some");
-    verify_with_preprocessed(&config, &air, &proof, &publics, Some(&vk)).is_ok()
+    verify_with_preprocessed(&config, &air, &proof, &publics, Some(range_vk())).is_ok()
+}
+
+/// 预处理 verifier key 的进程级缓存（AIR/config 全确定性）。
+fn range_vk() -> &'static p3_uni_stark::PreprocessedVerifierKey<RangeConfig> {
+    static VK: std::sync::OnceLock<p3_uni_stark::PreprocessedVerifierKey<RangeConfig>> =
+        std::sync::OnceLock::new();
+    VK.get_or_init(|| {
+        let config = range_config();
+        let air = RangeCheckAir::new();
+        setup_preprocessed(&config, &air, HEIGHT_LOG)
+            .expect("本 AIR 定义 7 列预处理列，setup 应返回 Some")
+            .1
+    })
 }
 
 #[cfg(test)]

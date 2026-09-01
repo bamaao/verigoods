@@ -121,8 +121,10 @@ const HALF_FULL_ROUNDS: usize = 4;
 const PARTIAL_ROUNDS: usize = 20;
 /// 域分隔标签（与 vg-infra-crypto poseidon 模块一致，勿改动）。
 const DOMAIN_LABEL: &[u8] = b"vg:poseidon:v1";
-/// trace 最大高度（KoalaBear 2-adicity = 24，留余量防御超长 parts）。
-const MAX_LOG_HEIGHT: usize = 20;
+/// trace 最大高度（DoS 面收紧：note 前像 ≤ 64 词 → 真实行 ≤ 66 行 →
+/// 高度 2^7 已宽裕；2^12 = 4096 行上限仍留足余量且阻止超长 parts
+/// 撑爆证明耗时）。
+const MAX_LOG_HEIGHT: usize = 12;
 /// 公开输入个数（C 的 8 limb）。
 const NUM_PUBLICS: usize = 8;
 

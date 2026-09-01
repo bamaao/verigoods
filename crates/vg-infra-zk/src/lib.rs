@@ -21,7 +21,12 @@
 //! 的异步端口并转换为 `ProofBundle`。
 
 pub mod circuits;
+pub mod dispatcher;
 
+pub use circuits::coldchain::{
+    coldchain_root, prove_coldchain, verify_coldchain, ColdchainProofOutput,
+    COLDCHAIN_MAX_CIRCUIT_ID, COLDCHAIN_MAX_CIRCUIT_VERSION,
+};
 pub use circuits::note_opening::{
     prove_note_opening, verify_note_opening, ProofOutput, NOTE_OPENING_CIRCUIT_ID,
     NOTE_OPENING_CIRCUIT_VERSION,
@@ -30,6 +35,7 @@ pub use circuits::range_check::{
     prove_range_check, range_commitment, range_commitment_parts, verify_range_check,
     RangeProofOutput, RANGE_CHECK_CIRCUIT_ID, RANGE_CHECK_CIRCUIT_VERSION,
 };
+pub use dispatcher::{ProverDispatcher, TransparentProver};
 
 /// ZK 电路统一错误。
 ///

@@ -1349,6 +1349,7 @@ dependencies = [
 name = "vg-infra-zk"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "hex",
  "p3-air",
  "p3-challenger",
@@ -1365,6 +1366,7 @@ dependencies = [
  "p3-uni-stark",
  "postcard",
  "thiserror",
+ "vg-domain",
  "vg-infra-crypto",
 ]
 
