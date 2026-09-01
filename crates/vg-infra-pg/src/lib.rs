@@ -1,10 +1,46 @@
 //! vg-infra-pg：PostgreSQL 基础设施层。
 //!
-//! 本 crate 承载 sqlx 迁移（`migrations/0001_init.sql`，全量表）与连接池
-//! 构造；仓储实现自 Task 15 起填充。迁移经 [`migrate`] 应用，Task 23 的
-//! bootstrap 将复用 [`pool::connect`] + [`migrate`] 组合完成库初始化。
+//! 本 crate 承载 sqlx 迁移（`migrations/`，0001 全量表 + 0002 jurisdiction
+//! 可空化）、连接池构造与领域仓储实现（Context 事务模式：`Context` 绑定
+//! `sqlx::Transaction<'static, Postgres>`，由 application 层编排提交/回滚）。
+//! 迁移经 [`migrate`] 应用，Task 23 的 bootstrap 将复用 [`pool::connect`] +
+//! [`migrate`] 组合完成库初始化。
+//!
+//! 已实现仓储：
+//! - [`identity_repo`]：DID 文档 / 能力委托（Task 15）；
+//! - [`credential_repo`]：可验证凭证（Task 15）。
 
+pub mod credential_repo;
+pub mod identity_repo;
 pub mod pool;
+
+pub use credential_repo::PgCredentialRepo;
+pub use identity_repo::PgIdentityRepo;
+
+/// sqlx 错误 → 领域存储错误的统一映射。
+pub(crate) fn storage(e: sqlx::Error) -> vg_domain::shared::DomainError {
+    vg_domain::shared::DomainError::Storage(e.to_string())
+}
+
+/// 领域枚举（serde snake_case）→ 库中文本。
+///
+/// 经 serde 序列化取字符串而非手写 match，保证与领域枚举的
+/// serde 命名（也是 CHECK 白名单口径）永不漂移。
+pub(crate) fn enum_to_text<T: serde::Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(s)) => s,
+        // 领域枚举均为 unit variant，序列化必为字符串；到达即编程错误
+        Ok(other) => unreachable!("领域枚举序列化应为字符串，实际 {other}"),
+        Err(e) => unreachable!("领域枚举序列化不应失败：{e}"),
+    }
+}
+
+/// 库中文本 → 领域枚举；未知值报 serde 数据错误（由调用方包装为 Storage）。
+pub(crate) fn enum_from_text<T: serde::de::DeserializeOwned>(
+    text: &str,
+) -> Result<T, serde_json::Error> {
+    serde_json::from_value(serde_json::Value::String(text.to_string()))
+}
 
 /// 应用内嵌迁移到目标库。
 ///
@@ -128,18 +164,24 @@ mod tests {
         }
 
         // 合法谱系 op（split/merge/transform，LineageOp 全集）逐一入库
-        for (child, op) in [("t-split", "split"), ("t-merge", "merge"), ("t-transform", "transform")] {
+        for (child, op) in [
+            ("t-split", "split"),
+            ("t-merge", "merge"),
+            ("t-transform", "transform"),
+        ] {
             sqlx::query("INSERT INTO batches (id, product_id, quantity, unit, produced_at, producer, state) VALUES ($1, 't-prod', 1, 'kg', now(), 't-did', 'created')")
                 .bind(child)
                 .execute(&mut *tx)
                 .await
                 .expect("插入子批次应成功");
-            sqlx::query("INSERT INTO batch_lineage (parent, child, op) VALUES ('t-parent', $1, $2)")
-                .bind(child)
-                .bind(op)
-                .execute(&mut *tx)
-                .await
-                .unwrap_or_else(|e| panic!("合法谱系 op {op} 应通过 CHECK：{e}"));
+            sqlx::query(
+                "INSERT INTO batch_lineage (parent, child, op) VALUES ('t-parent', $1, $2)",
+            )
+            .bind(child)
+            .bind(op)
+            .execute(&mut *tx)
+            .await
+            .unwrap_or_else(|e| panic!("合法谱系 op {op} 应通过 CHECK：{e}"));
         }
         // 非法 op：父子批次均已存在（避免 PK/FK 混淆），失败必为 CHECK；
         // 同样以 SAVEPOINT 包裹以继续外层事务
