@@ -12,7 +12,7 @@ use vg_domain::lifecycle::ports::LifecycleRepository;
 use vg_domain::lifecycle::{LifecycleEvent, LifecycleState};
 use vg_domain::shared::{DomainError, IntentId, ProofId, SubjectRef};
 
-use crate::{decode_subject, encode_subject, enum_from_text, enum_to_text, storage};
+use crate::{decode_subject, encode_subject, enum_from_text, enum_to_text, storage, uint_from_db};
 
 /// 生命周期事件的 PostgreSQL 仓储。
 #[derive(Debug, Default, Clone, Copy)]
@@ -113,11 +113,7 @@ fn map_event(r: &sqlx::postgres::PgRow) -> Result<LifecycleEvent, DomainError> {
         intent_id: IntentId::new(intent_id),
         proof_id: proof_id.map(ProofId::new),
         policy_version: policy_version
-            .map(|v| {
-                u64::try_from(v).map_err(|_| {
-                    DomainError::Storage(format!("库中 policy_version `{v}` 超出 u64 口径"))
-                })
-            })
+            .map(|v| uint_from_db(v, "policy_version"))
             .transpose()?,
         at: r.get("at"),
     })

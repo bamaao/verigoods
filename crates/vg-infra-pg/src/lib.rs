@@ -51,6 +51,17 @@ pub(crate) fn parse_did(
         .map_err(|e| vg_domain::shared::DomainError::Storage(format!("库中 DID `{raw}` 非法：{e}")))
 }
 
+/// bigint → u32/u64 等无符号整数还原；负数/超界说明存储层数据损坏，
+/// 报 Storage 错误（与 [`parse_did`] 同口径）。三仓储共用。
+pub(crate) fn uint_from_db<T: TryFrom<i64>>(
+    raw: i64,
+    field: &str,
+) -> Result<T, vg_domain::shared::DomainError> {
+    T::try_from(raw).map_err(|_| {
+        vg_domain::shared::DomainError::Storage(format!("库中 {field} `{raw}` 超出无符号整数口径"))
+    })
+}
+
 /// 领域枚举（serde snake_case）→ 库中文本。
 ///
 /// 经 serde 序列化取字符串而非手写 match，保证与领域枚举的

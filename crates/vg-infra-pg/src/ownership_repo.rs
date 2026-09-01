@@ -20,7 +20,7 @@ use vg_domain::ownership::ports::OwnershipRepository;
 use vg_domain::ownership::{CustodyState, OwnershipState, TransferRecord};
 use vg_domain::shared::{DomainError, SubjectRef};
 
-use crate::{decode_subject, encode_subject, parse_did, storage};
+use crate::{decode_subject, encode_subject, parse_did, storage, uint_from_db};
 
 /// 所有权/保管上下文的 PostgreSQL 仓储。
 #[derive(Debug, Default, Clone, Copy)]
@@ -84,13 +84,8 @@ impl OwnershipRepository for PgOwnershipRepo {
                 subject: decode_subject(r.get("subject"))?,
                 owner: parse_did(r.get("owner"))?,
                 acquired_at: r.get("acquired_at"),
-                transfer_count: u32::try_from(transfer_count).map_err(|_| {
-                    DomainError::Storage(format!(
-                        "库中 transfer_count `{transfer_count}` 超出 u32 口径"
-                    ))
-                })?,
-                c2c_count: u32::try_from(c2c_count)
-                    .map_err(|_| DomainError::Storage(format!("库中 c2c_count `{c2c_count}` 超出 u32 口径")))?,
+                transfer_count: uint_from_db(transfer_count, "transfer_count")?,
+                c2c_count: uint_from_db(c2c_count, "c2c_count")?,
             })
         })
         .transpose()
@@ -200,16 +195,8 @@ impl OwnershipRepository for PgOwnershipRepo {
                     to: parse_did(r.get("to_did"))?,
                     c2c: r.get("c2c"),
                     at: r.get("at"),
-                    transfer_count: u32::try_from(transfer_count).map_err(|_| {
-                        DomainError::Storage(format!(
-                            "库中 transfer_count `{transfer_count}` 超出 u32 口径"
-                        ))
-                    })?,
-                    c2c_count: u32::try_from(c2c_count).map_err(|_| {
-                        DomainError::Storage(format!(
-                            "库中 c2c_count `{c2c_count}` 超出 u32 口径"
-                        ))
-                    })?,
+                    transfer_count: uint_from_db(transfer_count, "transfer_count")?,
+                    c2c_count: uint_from_db(c2c_count, "c2c_count")?,
                 })
             })
             .collect()

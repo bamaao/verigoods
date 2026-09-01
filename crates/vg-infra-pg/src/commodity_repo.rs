@@ -16,7 +16,7 @@ use vg_domain::commodity::{Asset, Batch, LineageEdge, ProductType};
 use vg_domain::lifecycle::LifecycleState;
 use vg_domain::shared::{AssetId, BatchId, DomainError, Hash32, ProductId};
 
-use crate::{enum_from_text, enum_to_text, parse_did, storage};
+use crate::{enum_from_text, enum_to_text, parse_did, storage, uint_from_db};
 
 /// 商品上下文的 PostgreSQL 仓储。
 #[derive(Debug, Default, Clone, Copy)]
@@ -28,13 +28,6 @@ fn hash32_from_db(bytes: Vec<u8>, field: &str) -> Result<Hash32, DomainError> {
         .try_into()
         .map_err(|_| DomainError::Storage(format!("库中 {field} 长度非法")))?;
     Ok(Hash32::from_bytes(arr))
-}
-
-/// bigint → u32/u64 计数还原；负数/超界说明存储层数据损坏。
-fn uint_from_db<T: TryFrom<i64>>(raw: i64, field: &str) -> Result<T, DomainError> {
-    T::try_from(raw).map_err(|_| {
-        DomainError::Storage(format!("库中 {field} `{raw}` 超出领域整数口径"))
-    })
 }
 
 #[async_trait]
