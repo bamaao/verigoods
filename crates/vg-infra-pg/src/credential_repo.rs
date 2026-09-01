@@ -13,7 +13,7 @@ use vg_domain::credential::ports::CredentialRepository;
 use vg_domain::credential::{CredStatus, VerifiableCredential};
 use vg_domain::shared::{CredentialId, Did, DomainError, Hash32};
 
-use crate::{enum_from_text, enum_to_text, storage};
+use crate::{enum_from_text, enum_to_text, parse_did, storage};
 
 /// 凭证聚合的 PostgreSQL 仓储。
 #[derive(Debug, Default, Clone, Copy)]
@@ -187,11 +187,6 @@ fn row_to_vc(row: &sqlx::postgres::PgRow) -> Result<VerifiableCredential, Domain
             .map_err(|e| DomainError::Storage(format!("库中 status `{status}` 非法：{e}")))?,
         credential_hash: Hash32::from_bytes(bytes),
     })
-}
-
-/// 从库中文本还原 DID；解析失败说明存储层数据损坏，报 Storage 错误。
-fn parse_did(raw: &str) -> Result<Did, DomainError> {
-    Did::parse(raw).map_err(|e| DomainError::Storage(format!("库中 DID `{raw}` 非法：{e}")))
 }
 
 #[cfg(test)]

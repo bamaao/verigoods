@@ -12,7 +12,7 @@ use vg_domain::identity::ports::IdentityRepository;
 use vg_domain::identity::{Capability, DidDocument, VerificationMethod};
 use vg_domain::shared::{Did, DomainError, Hash32};
 
-use crate::{enum_from_text, enum_to_text, storage};
+use crate::{enum_from_text, enum_to_text, parse_did, storage};
 
 /// 身份聚合的 PostgreSQL 仓储。
 #[derive(Debug, Default, Clone, Copy)]
@@ -200,11 +200,6 @@ impl IdentityRepository for PgIdentityRepo {
             })
             .collect()
     }
-}
-
-/// 从库中文本还原 DID；解析失败说明存储层数据损坏，报 Storage 错误。
-fn parse_did(raw: &str) -> Result<Did, DomainError> {
-    Did::parse(raw).map_err(|e| DomainError::Storage(format!("库中 DID `{raw}` 非法：{e}")))
 }
 
 /// 还原 [`Action`] 时的损坏数据包装（避免闭包内重复格式化）。

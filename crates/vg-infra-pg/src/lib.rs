@@ -18,8 +18,27 @@ pub use credential_repo::PgCredentialRepo;
 pub use identity_repo::PgIdentityRepo;
 
 /// sqlx 错误 → 领域存储错误的统一映射。
+///
+/// 保留错误结构：数据库层错误在消息尾部编入 SQLSTATE（如 `[23505]`），
+/// 供日志排查与调用方按码分诊，避免 `to_string` 压平后信息丢失。
 pub(crate) fn storage(e: sqlx::Error) -> vg_domain::shared::DomainError {
-    vg_domain::shared::DomainError::Storage(e.to_string())
+    // code() 返回 Option<Cow<str>>：数据库错误必有 SQLSTATE，非 DB 错误
+    // （连接/解码等）无码，附加段留空
+    let detail = e
+        .as_database_error()
+        .and_then(|d| d.code().map(|c| format!(" [{c}]")))
+        .unwrap_or_default();
+    vg_domain::shared::DomainError::Storage(format!("{e}{detail}"))
+}
+
+/// 从库中文本还原 DID；解析失败说明存储层数据损坏，报 Storage 错误。
+///
+/// identity / credential 两仓储共用（Task 16/17 仓储沿用本工具集）。
+pub(crate) fn parse_did(
+    raw: &str,
+) -> Result<vg_domain::shared::Did, vg_domain::shared::DomainError> {
+    vg_domain::shared::Did::parse(raw)
+        .map_err(|e| vg_domain::shared::DomainError::Storage(format!("库中 DID `{raw}` 非法：{e}")))
 }
 
 /// 领域枚举（serde snake_case）→ 库中文本。
