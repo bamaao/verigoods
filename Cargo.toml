@@ -35,3 +35,12 @@ hkdf = "0.12"
 rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# sqlx：PG 访问层（运行时 tokio；ID 全 String 故不需要 uuid feature）
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-none",
+    "postgres",
+    "chrono",
+    "macros",
+    "migrate",
+] }

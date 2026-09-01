@@ -1,0 +1,10 @@
+[package]
+name = "vg-infra-pg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sqlx = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
