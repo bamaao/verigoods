@@ -1,21 +1,31 @@
 //! vg-infra-pg：PostgreSQL 基础设施层。
 //!
 //! 本 crate 承载 sqlx 迁移（`migrations/`，0001 全量表 + 0002 jurisdiction
-//! 可空化）、连接池构造与领域仓储实现（Context 事务模式：`Context` 绑定
+//! 可空化 + 0003 生命周期事件表 + 0004 转移记录列/谱系时间列）、
+//! 连接池构造与领域仓储实现（Context 事务模式：`Context` 绑定
 //! `sqlx::Transaction<'static, Postgres>`，由 application 层编排提交/回滚）。
 //! 迁移经 [`migrate`] 应用，Task 23 的 bootstrap 将复用 [`pool::connect`] +
 //! [`migrate`] 组合完成库初始化。
 //!
 //! 已实现仓储：
 //! - [`identity_repo`]：DID 文档 / 能力委托（Task 15）；
-//! - [`credential_repo`]：可验证凭证（Task 15）。
+//! - [`credential_repo`]：可验证凭证（Task 15）；
+//! - [`commodity_repo`]：商品类型 / 批次 / 单品 / 谱系（Task 16）；
+//! - [`ownership_repo`]：所有权 / 保管 / 转移流水（Task 16）；
+//! - [`lifecycle_repo`]：生命周期事件日志（Task 16）。
 
+pub mod commodity_repo;
 pub mod credential_repo;
 pub mod identity_repo;
+pub mod lifecycle_repo;
+pub mod ownership_repo;
 pub mod pool;
 
+pub use commodity_repo::PgCommodityRepo;
 pub use credential_repo::PgCredentialRepo;
 pub use identity_repo::PgIdentityRepo;
+pub use lifecycle_repo::PgLifecycleRepo;
+pub use ownership_repo::PgOwnershipRepo;
 
 /// sqlx 错误 → 领域存储错误的统一映射。
 ///
@@ -61,6 +71,47 @@ pub(crate) fn enum_from_text<T: serde::de::DeserializeOwned>(
     serde_json::from_value(serde_json::Value::String(text.to_string()))
 }
 
+/// [`SubjectRef`] 落库唯一编码：`batch:<id>` / `asset:<id>`。
+///
+/// 全 crate 统一口径：ownership_states / custody_states / transfers /
+/// lifecycle_events / notes.asset_ref 的 subject 列共用本编码，禁止各仓储
+/// 自行拼接导致格式漂移。
+pub(crate) fn encode_subject(subject: &vg_domain::shared::SubjectRef) -> String {
+    match subject {
+        vg_domain::shared::SubjectRef::Batch(id) => format!("batch:{id}"),
+        vg_domain::shared::SubjectRef::Asset(id) => format!("asset:{id}"),
+    }
+}
+
+/// 从库中文本还原 [`SubjectRef`]；非法前缀/格式说明存储层数据损坏，
+/// 报 Storage 错误（[`encode_subject`] 的逆函数）。
+pub(crate) fn decode_subject(
+    raw: &str,
+) -> Result<vg_domain::shared::SubjectRef, vg_domain::shared::DomainError> {
+    use vg_domain::shared::{AssetId, BatchId, DomainError, SubjectRef};
+    let (kind, id) = raw.split_once(':').ok_or_else(|| {
+        DomainError::Storage(format!("库中主体 `{raw}` 非法：缺少类型前缀"))
+    })?;
+    match kind {
+        "batch" => Ok(SubjectRef::Batch(BatchId::new(id))),
+        "asset" => Ok(SubjectRef::Asset(AssetId::new(id))),
+        other => Err(DomainError::Storage(format!(
+            "库中主体 `{raw}` 非法：未知类型前缀 `{other}`"
+        ))),
+    }
+}
+
+/// 判定 sqlx 错误是否为唯一约束违例（SQLSTATE 23505）。
+///
+/// 说明：仓储主路径用 `ON CONFLICT DO NOTHING` + 行计数承载幂等/冲突
+/// （唯一约束违例会中止整个 PostgreSQL 事务，见 ownership_repo 文档）；
+/// 本判定仅供测试断言约束本身（如 transfers.intent_id UNIQUE）。
+#[cfg(test)]
+pub(crate) fn is_unique_violation(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .is_some_and(|d| d.code().as_deref() == Some("23505"))
+}
+
 /// 应用内嵌迁移到目标库。
 ///
 /// sqlx 自带 `_sqlx_migrations` 版本表：已应用的迁移自动跳过，
@@ -91,6 +142,7 @@ mod tests {
         "domain_events",
         "intents",
         "ledger_anchors",
+        "lifecycle_events",
         "notes",
         "nullifiers",
         "ownership_states",
