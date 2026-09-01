@@ -53,9 +53,22 @@ pub mod ports {
 
         /// 更新指定 Intent 的状态（调用方负责先经 [`Intent::advance`] 裁决合法边）。
         ///
-        /// 本方法**仅持久化 status 字段**；`rejection` / `result_ref` 的持久化
-        /// 由后续任务（Task 19/17）补全（save 全量或专用更新方法），调用方当前
-        /// 不得依赖二者落库。
+        /// 全量持久化 Intent（含 rejection/result_ref 等侧字段）。
+        ///
+        /// 供 reject(reason)/confirm(result_ref) 后的落库路径；upsert 语义：
+        /// id 已存在时更新全部可变字段（status/risk/payload/nonce/expires_at/
+        /// rejection/result_ref/updated_at），created_at 保留首建值。
+        async fn save(
+            &self,
+            ctx: &mut Self::Context,
+            intent: &Intent,
+        ) -> Result<(), DomainError>;
+
+        /// 薄写入：仅持久化 status 字段（调用方负责先经 [`Intent::advance`]
+        /// 裁决合法边）。
+        ///
+        /// `rejection` / `result_ref` 的持久化走 [`IntentRepository::save`]；
+        /// 用本方法落终态时二者不随写。
         async fn update_status(
             &self,
             ctx: &mut Self::Context,
@@ -113,6 +126,17 @@ mod tests {
             id: &IntentId,
         ) -> Result<Option<Intent>, DomainError> {
             Ok(ctx.intents.get(&id.to_string()).cloned())
+        }
+
+        async fn save(
+            &self,
+            ctx: &mut Self::Context,
+            intent: &Intent,
+        ) -> Result<(), DomainError> {
+            // HashMap 天然 upsert：id 已存在时整体覆盖（保留首建 created_at
+            // 属持久化实现的列级职责，内存实现无该列，直接以入参为准）。
+            ctx.intents.insert(intent.id.to_string(), intent.clone());
+            Ok(())
         }
 
         async fn update_status(
@@ -214,6 +238,27 @@ mod tests {
             other => panic!("更新不存在的 ID 应报 NotFound，实际：{other:?}"),
         }
 
+        // save：upsert 全量覆盖——reject 场景的 rejection 随 save 落库
+        let mut rejected = sample_intent("i-3", 3);
+        rejected.reject("凭证缺失").expect("reject 应成功");
+        block_on(repo.save(&mut ctx, &rejected)).expect("save 应成功");
+        let saved = block_on(repo.get(&mut ctx, &IntentId::new("i-3")))
+            .expect("查询不应报错")
+            .expect("i-3 应存在");
+        assert_eq!(saved, rejected, "save 后 get 应深相等（含 rejection）");
+        assert_eq!(saved.rejection.as_deref(), Some("凭证缺失"));
+        assert_eq!(saved.status, IntentStatus::Rejected);
+
+        // save 对新 id 同样可用（首建路径）
+        let fresh = sample_intent("i-4", 4);
+        block_on(repo.save(&mut ctx, &fresh)).expect("save 新 id 应成功");
+        assert_eq!(
+            block_on(repo.get(&mut ctx, &IntentId::new("i-4")))
+                .expect("查询不应报错")
+                .expect("i-4 应存在"),
+            fresh
+        );
+
         // list_pending 只含非终态
         let mut confirmed = sample_intent("i-2", 2);
         confirmed
@@ -226,9 +271,10 @@ mod tests {
             .expect("测试路径推进不应失败");
         block_on(repo.insert(&mut ctx, &confirmed)).expect("插入应成功");
         let pending = block_on(repo.list_pending(&mut ctx)).expect("查询不应报错");
-        assert_eq!(pending.len(), 1, "仅 i-1(Validated) 非终态");
-        assert_eq!(pending[0].id, IntentId::new("i-1"));
+        assert_eq!(pending.len(), 2, "i-1(Validated) 与 i-4(Created) 非终态；i-3 已 Rejected");
         assert!(pending.iter().all(|i| !i.status.is_terminal()));
+        assert!(pending.contains(&block_on(repo.get(&mut ctx, &IntentId::new("i-1"))).unwrap().unwrap()));
+        assert!(pending.contains(&block_on(repo.get(&mut ctx, &IntentId::new("i-4"))).unwrap().unwrap()));
     }
 
     /// 编译期哨兵（与 policy / identity 同款）：`R::Context: Send`
