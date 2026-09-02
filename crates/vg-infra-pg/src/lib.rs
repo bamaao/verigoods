@@ -119,9 +119,9 @@ pub(crate) fn decode_subject(
     raw: &str,
 ) -> Result<vg_domain::shared::SubjectRef, vg_domain::shared::DomainError> {
     use vg_domain::shared::{AssetId, BatchId, DomainError, SubjectRef};
-    let (kind, id) = raw.split_once(':').ok_or_else(|| {
-        DomainError::Storage(format!("库中主体 `{raw}` 非法：缺少类型前缀"))
-    })?;
+    let (kind, id) = raw
+        .split_once(':')
+        .ok_or_else(|| DomainError::Storage(format!("库中主体 `{raw}` 非法：缺少类型前缀")))?;
     match kind {
         "batch" => Ok(SubjectRef::Batch(BatchId::new(id))),
         "asset" => Ok(SubjectRef::Asset(AssetId::new(id))),

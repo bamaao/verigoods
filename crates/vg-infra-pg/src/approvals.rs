@@ -179,9 +179,15 @@ mod tests {
         seed_intent(&mut tx, "it-ap-2").await;
 
         let id = vg_domain::shared::IntentId::new("it-ap-2");
-        store.upsert_undecided(&mut tx, &id, "regulator").await.unwrap();
+        store
+            .upsert_undecided(&mut tx, &id, "regulator")
+            .await
+            .unwrap();
         // 二次 upsert（角色不同）应为 no-op
-        store.upsert_undecided(&mut tx, &id, "enterprise").await.unwrap();
+        store
+            .upsert_undecided(&mut tx, &id, "enterprise")
+            .await
+            .unwrap();
         let row = store.find(&mut tx, &id).await.unwrap().unwrap();
         assert_eq!(row.required_role, "regulator", "首行角色不得被覆盖");
         tx.commit().await.unwrap();
@@ -196,7 +202,10 @@ mod tests {
         seed_intent(&mut tx, "it-ap-3").await;
 
         let id = vg_domain::shared::IntentId::new("it-ap-3");
-        store.upsert_undecided(&mut tx, &id, "regulator").await.unwrap();
+        store
+            .upsert_undecided(&mut tx, &id, "regulator")
+            .await
+            .unwrap();
 
         let approver = Did::parse("did:vg:user:reg-19").unwrap();
         let at = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
@@ -204,11 +213,7 @@ mod tests {
             .mark_decided(&mut tx, &id, &approver, at)
             .await
             .expect("首次决策应成功");
-        let row = store
-            .find(&mut tx, &id)
-            .await
-            .unwrap()
-            .expect("行应存在");
+        let row = store.find(&mut tx, &id).await.unwrap().expect("行应存在");
         assert!(!row.is_undecided());
         assert_eq!(row.decided_by.as_deref(), Some("did:vg:user:reg-19"));
         assert_eq!(row.decided_at, Some(at));
@@ -219,7 +224,10 @@ mod tests {
             other => panic!("已决策二次 mark 应报 AlreadyExists，实际：{other:?}"),
         }
         // 已决策后 upsert 不得覆盖决策
-        store.upsert_undecided(&mut tx, &id, "enterprise").await.unwrap();
+        store
+            .upsert_undecided(&mut tx, &id, "enterprise")
+            .await
+            .unwrap();
         let row = store.find(&mut tx, &id).await.unwrap().unwrap();
         assert_eq!(row.required_role, "regulator");
         assert_eq!(row.decided_by.as_deref(), Some("did:vg:user:reg-19"));

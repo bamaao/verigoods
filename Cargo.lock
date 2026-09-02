@@ -2249,6 +2249,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vg-application"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "vg-domain",
+ "vg-infra-pg",
+]
+
+[[package]]
 name = "vg-domain"
 version = "0.1.0"
 dependencies = [
