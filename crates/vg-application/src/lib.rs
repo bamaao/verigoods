@@ -28,6 +28,10 @@ pub mod services;
 
 pub use deps::{AppDeps, PgTx};
 pub use error::AppError;
+pub use services::compliance::{
+    check_compliance, get_required_credentials, recompute_compliance, ComplianceOutcome,
+    ComplianceReport,
+};
 pub use handlers::register_default;
 pub use intent_engine::{
     required_capability, HandlerMap, HandlerOutcome, IntentEngine, IntentHandler, IntentResult,
