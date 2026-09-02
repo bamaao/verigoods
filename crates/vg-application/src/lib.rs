@@ -22,10 +22,12 @@
 
 pub mod deps;
 pub mod error;
+pub mod handlers;
 pub mod intent_engine;
 
 pub use deps::{AppDeps, PgTx};
 pub use error::AppError;
+pub use handlers::register_default;
 pub use intent_engine::{
     required_capability, HandlerMap, HandlerOutcome, IntentEngine, IntentHandler, IntentResult,
     RawIntent,

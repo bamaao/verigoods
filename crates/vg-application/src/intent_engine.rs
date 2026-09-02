@@ -49,7 +49,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vg_domain::identity::capability::Action as CapabilityAction;
 use vg_domain::intent::{Intent, IntentAction, IntentStatus, RiskLevel};
-use vg_domain::shared::{Did, DomainError, IntentId};
+use vg_domain::policy::PolicyVersion;
+use vg_domain::shared::{Did, DomainError, IntentId, ProofId};
 use vg_infra_pg::audit::AuditEntry;
 
 use crate::deps::{AppDeps, PgTx};
@@ -78,8 +79,9 @@ pub struct RawIntent {
     //
     // 隐含 schema 约定：拒绝路径的审计资源取 `payload["subject"]`（见
     // `deny_resource`，缺省以动作名兜底）——Task 20 起各 handler 的载荷
-    // **必须**含 `subject` 字段（如 `"batch:bt-1"`），否则拒绝审计的
-    // resource 退化为动作名，可观测性受损。
+    // **必须**含 `subject` 字段（`SubjectRef` 对象形
+    // `{"type":"batch","id":"bt-1"}`），否则拒绝审计的 resource 退化为
+    // 动作名，可观测性受损。
 }
 
 /// 引擎执行结果（幂等重复提交返回同一结果）。
@@ -157,6 +159,12 @@ pub enum HandlerOutcome {
         result_ref: String,
         /// 审计资源标识（如 `batch:bt-1`）。
         resource: String,
+        /// 本次执行实际生效的策略版本集合（Task 20 起 handler 携带，
+        /// engine 审计列 `policy_id` / `policy_version` 取**最后一条**
+        /// enforced 版本——多条适用策略全部执行的审计口径，doc 锁定）。
+        policy: Vec<PolicyVersion>,
+        /// 关联的 ZK 证明 ID（无证明路径为 `None`，Task 21/22 填充）。
+        proof_id: Option<ProofId>,
     },
     /// L3/L4 审批门：已通过业务校验/policy/证明，等待审批。
     AwaitingApproval {
@@ -285,7 +293,7 @@ impl IntentEngine {
             intent.advance(IntentStatus::Expired)?;
             let resource = deny_resource(&intent);
             self.deps.intents.save(&mut tx, &intent).await?;
-            self.audit(&mut tx, &intent, &resource, "deny", now).await?;
+            self.audit(&mut tx, &intent, &resource, "deny", now, &[], None).await?;
             return self.commit(tx, result_of(&intent, false)).await;
         }
 
@@ -328,7 +336,7 @@ impl IntentEngine {
             intent.advance(IntentStatus::Expired)?;
             let resource = deny_resource(&intent);
             self.deps.intents.save(&mut tx, &intent).await?;
-            self.audit(&mut tx, &intent, &resource, "deny", now).await?;
+            self.audit(&mut tx, &intent, &resource, "deny", now, &[], None).await?;
             return self.commit(tx, result_of(&intent, false)).await;
         }
 
@@ -493,13 +501,15 @@ impl IntentEngine {
             Ok(HandlerOutcome::Completed {
                 result_ref,
                 resource,
+                policy,
+                proof_id,
             }) => {
                 // 收尾正序：当前状态 → Approved → Submitted → Confirmed。
                 advance_to_approved(&mut intent)?;
                 intent.advance(IntentStatus::Submitted)?;
                 intent.confirm(&result_ref)?;
                 self.deps.intents.save(&mut tx, &intent).await?;
-                self.audit(&mut tx, &intent, &resource, "allow", now)
+                self.audit(&mut tx, &intent, &resource, "allow", now, &policy, proof_id.as_ref())
                     .await?;
                 self.commit(tx, result_of(&intent, false)).await
             }
@@ -519,7 +529,7 @@ impl IntentEngine {
         let resource = deny_resource(&intent);
         intent.reject(reason)?;
         self.deps.intents.save(&mut tx, &intent).await?;
-        self.audit(&mut tx, &intent, &resource, "deny", now).await?;
+        self.audit(&mut tx, &intent, &resource, "deny", now, &[], None).await?;
         self.commit(tx, result_of(&intent, false)).await
     }
 
@@ -535,8 +545,11 @@ impl IntentEngine {
 
     /// 审计条目写入（action 词表 = IntentAction snake_case；result ∈ allow|deny）。
     ///
-    /// policy_id/version 与 proof_id 本段恒 None：策略命中信息由 Task20+
-    /// 扩展 [`HandlerOutcome`] 携带，届时在此填充。
+    /// **policy 口径（Task 20 起）**：`policy_id` / `policy_version` 取
+    /// handler 携带的 enforced 策略版本**最后一条**（多条适用策略全部执行时，
+    /// 审计行记录终裁版本；空集合 → 两列皆 None）。deny 路径策略尚未执行，
+    /// 恒传空集合。
+    #[allow(clippy::too_many_arguments)] // 审计上下文全量透传，参数即审计字段清单
     async fn audit(
         &self,
         tx: &mut PgTx,
@@ -544,7 +557,14 @@ impl IntentEngine {
         resource: &str,
         result: &str,
         now: DateTime<Utc>,
+        policy: &[PolicyVersion],
+        proof_id: Option<&ProofId>,
     ) -> Result<(), AppError> {
+        // enforced 最后一条为审计口径；(PolicyId, u64) 拆列为 audit 表的两列
+        let (policy_id, policy_version) = match policy.last() {
+            Some((id, version)) => (Some(id.to_string()), Some(*version as i64)),
+            None => (None, None),
+        };
         self.deps
             .audit
             .append(
@@ -555,9 +575,9 @@ impl IntentEngine {
                     intent_id: Some(intent.id.as_ref().to_string()),
                     action: intent.action.as_str().to_string(),
                     resource: resource.to_string(),
-                    policy_id: None,
-                    policy_version: None,
-                    proof_id: None,
+                    policy_id,
+                    policy_version,
+                    proof_id: proof_id.map(|p| p.to_string()),
                     result: result.to_string(),
                     at: now,
                 },
@@ -596,13 +616,23 @@ fn result_of(intent: &Intent, awaiting_approval: bool) -> IntentResult {
 }
 
 /// 拒绝路径的审计资源：payload 的 `subject` 字段，缺省以动作名兜底。
+///
+/// Task 20 起 subject 的规范形为 [`SubjectRef`] 的对象形
+/// `{"type":"batch","id":"bt-1"}`——此处编码为 `batch:bt-1`（与 infra
+/// `encode_subject` 同一口径）；兼容旧的纯字符串形。
 fn deny_resource(intent: &Intent) -> String {
-    intent
-        .payload
-        .get("subject")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| intent.action.as_str().to_string())
+    match intent.payload.get("subject") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Object(map)) => {
+            let kind = map.get("type").and_then(Value::as_str);
+            let id = map.get("id").and_then(Value::as_str);
+            match (kind, id) {
+                (Some(k), Some(i)) if !k.is_empty() && !i.is_empty() => format!("{k}:{i}"),
+                _ => intent.action.as_str().to_string(),
+            }
+        }
+        _ => intent.action.as_str().to_string(),
+    }
 }
 
 /// SubjectKind 的 snake_case 文本（与 dids 表 CHECK 白名单口径一致）。
@@ -720,6 +750,8 @@ mod tests {
             Ok(HandlerOutcome::Completed {
                 result_ref: "stub:batch-ref-1".into(),
                 resource: "batch:stub-1".into(),
+                policy: vec![],
+                proof_id: None,
             })
         }
     }
@@ -757,6 +789,8 @@ mod tests {
                 Some(false) => Ok(HandlerOutcome::Completed {
                     result_ref: "stub:transfer-ref-1".into(),
                     resource: "batch:stub-t".into(),
+                    policy: vec![],
+                    proof_id: None,
                 }),
             }
         }
