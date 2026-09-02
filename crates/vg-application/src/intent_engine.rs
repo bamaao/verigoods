@@ -598,7 +598,8 @@ mod tests {
         assert_allowed, ports::IdentityRepository, Capability, DidDocument, SubjectKind,
         VerificationMethod,
     };
-    use vg_domain::ports::{CircuitSpec, LedgerItem, NoteHasher, ProofProver, Witness};
+    use vg_domain::intent::ports::IntentRepository;
+    use vg_domain::ports::{CircuitSpec, NoteHasher, ProofProver, Witness};
     use vg_domain::shared::{DomainError, Hash32};
     use vg_infra_pg::{
         InProcessLedger, PgApprovalsStore, PgAuditWriter, PgCommodityRepo, PgCredentialRepo,
@@ -1225,21 +1226,49 @@ mod tests {
             other => panic!("终态意图 approve 应报 InvalidInput，实际：{other:?}"),
         }
 
-        // 非终态但无审批待办（授权即拒的中间态不可得，直接造一个 awaiting 后
-        // 删行不便——用未走门路径：另起 intent 手工落 Authorized 行为不可取，
-        // 改为断言 L2 直通后 approvals 无行 + approve 报 InvalidInput 已由
-        // 终态路径覆盖；此处验证终态优先级即可）
+        // 非终态但无审批待办：手工构造一个 Authorized 状态的 intent 落库
+        // （不经 execute，故不产生 approvals 行），approve 应报
+        // InvalidInput（消息含「无审批待办」）。
+        let mut intent = Intent::new(
+            IntentId::new("it-ap-2"),
+            IntentAction::CreateBatch,
+            actor.clone(),
+            None,
+            serde_json::json!({"subject": "batch:x", "qty": 1}),
+            99,
+            Utc::now(),
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .unwrap();
+        intent.advance(IntentStatus::Validated).unwrap();
+        intent.advance(IntentStatus::Authorized).unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        PgIntentRepository
+            .insert(&mut tx, &intent)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+
+        match engine.approve(&IntentId::new("it-ap-2"), &regulator).await {
+            Err(AppError::Domain(DomainError::InvalidInput(msg))) => {
+                assert!(msg.contains("无审批待办"), "实际消息：{msg}");
+            }
+            other => panic!("无审批待办应报 InvalidInput（无审批待办），实际：{other:?}"),
+        }
     }
 
     /// handler 业务段 Err：业务写入回滚（savepoint）、intent=Rejected 保留、
     /// 审计 deny。
     #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
     async fn handler_error_rolls_back_business_and_keeps_intent(pool: sqlx::PgPool) {
-        use vg_domain::shared::Hash32;
+        use vg_domain::events::DomainEvent;
+        use vg_domain::shared::{BatchId, ProductId};
         let actor = did("did:vg:user:ent-err");
         seed_actor(&pool, &actor, Some(CapabilityAction::CreateBatch), false).await;
 
-        /// 失败桩：先写一行业务数据（借 ledger 表），再报业务错误。
+        /// 失败桩：先在**事务内**写一行业务数据（outbox 事件，随 tx 提交/
+        /// 回滚），再报业务错误——验证 ROLLBACK TO SAVEPOINT 撤销的是
+        /// 事务内业务写入。
         struct FailingHandler;
         #[async_trait]
         impl IntentHandler for FailingHandler {
@@ -1249,14 +1278,24 @@ mod tests {
             async fn handle(
                 &self,
                 deps: &AppDeps,
-                _tx: &mut PgTx,
+                tx: &mut PgTx,
                 intent: &mut Intent,
                 _now: DateTime<Utc>,
             ) -> Result<HandlerOutcome, DomainError> {
                 intent.advance(IntentStatus::PolicyChecked)?;
-                // 业务写入（账本锚定，自管连接池）
-                deps.ledger
-                    .anchor(LedgerItem::Commitment(Hash32::keccak(b"biz")))
+                // 事务内业务写入：outbox 追加（INSERT 走引擎事务，受
+                // SAVEPOINT 保护）。
+                deps.outbox
+                    .append(
+                        tx,
+                        "intent:it-err-1",
+                        &DomainEvent::BatchCreated {
+                            batch: BatchId::new("bt-err-biz"),
+                            product: ProductId::new("pd-err"),
+                            quantity: 1,
+                            producer: intent.actor.clone(),
+                        },
+                    )
                     .await?;
                 Err(DomainError::PolicyViolated("数量超限".into()))
             }
@@ -1274,6 +1313,15 @@ mod tests {
             .is_some_and(|r| r.contains("数量超限")));
         assert_eq!(intent_status(&pool, "it-err-1").await, "rejected");
         assert_eq!(audit_count(&pool, "it-err-1", "deny").await, 1);
+        // savepoint 真实回滚断言：事务内业务写入（outbox 事件）被 ROLLBACK
+        // TO SAVEPOINT 撤销，执行后不落任何行。
+        let biz: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM domain_events WHERE aggregate = 'intent:it-err-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(biz.0, 0, "事务内业务写入应被 savepoint 回滚撤销");
     }
 
     /// 映射表穷举：required_capability 覆盖全部 13 动作且与文档表一致。
