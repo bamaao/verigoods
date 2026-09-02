@@ -30,6 +30,15 @@
 //!
 //! 口径（Task 20 延续）：policy 辖区取**资源归属者**（VC subject 企业）
 //! 的辖区；凭证持有者 = 归属者本人；类目取主体商品档案的 `category`。
+//!
+//! ## 范围与已知缺口
+//!
+//! - **重算范围为 `payload.subject` 单批**：owner 名下其他批次在各自
+//!   下次触发重算前不追溯（跨批次一致性缺口；owner 全量重算列为
+//!   Task 24/后续待办）。
+//! - **lce 事件 ID 后缀差异**：本服务事件 ID 为 `lce:<intent_id>:recall`
+//!   / `lce:<intent_id>:restore`，而 Task 20 生命周期处理器为纯
+//!   `lce:<intent_id>`——Task 24 若按 ID 前缀过滤事件需注意两种形态。
 
 use chrono::{DateTime, Utc};
 
@@ -38,7 +47,7 @@ use vg_domain::events::DomainEvent;
 use vg_domain::lifecycle::{self, LifecycleEvent, LifecycleState};
 use vg_domain::policy::Policy;
 use vg_domain::policy::PolicyEngine;
-use vg_domain::shared::{Did, DomainError, IntentId, SubjectRef};
+use vg_domain::shared::{DomainError, IntentId, SubjectRef};
 
 use crate::deps::{AppDeps, PgTx};
 use crate::handlers::{product_category_of, subject_label};
@@ -63,9 +72,11 @@ pub struct ComplianceReport {
     pub missing: Vec<CredentialType>,
 }
 
-/// 纯检核结论：owner / required 并集 / missing 差集。
+/// 纯检核结论：策略全集 / 凭证全集 / required 并集 /
+/// missing 差集（恢复分支复用 assess 已取数据，不重复查询）。
 struct Assessment {
-    owner: Did,
+    policies: Vec<Policy>,
+    creds: Vec<vg_domain::credential::VerifiableCredential>,
     required: Vec<CredentialType>,
     missing: Vec<CredentialType>,
 }
@@ -132,7 +143,8 @@ async fn assess(
         .filter(|ctype| !effective.contains(ctype))
         .collect();
     Ok(Assessment {
-        owner,
+        policies,
+        creds,
         required,
         missing,
     })
@@ -168,6 +180,9 @@ async fn current_state(
 /// 追加生命周期事件并回写聚合状态（召回/恢复共用；事件 ID 派生自
 /// intent + 后缀，同 intent 内两条迁移（先召回后恢复不可能同 intent，
 /// 后缀仍保留以防未来扩展）不撞键）。
+///
+/// `compliance_ok` 为重算结论回写（召回 false / 恢复 true）——仅
+/// Batch 形态落库（Asset 无此字段，静默跳过）。
 #[allow(clippy::too_many_arguments)]
 async fn record_transition(
     deps: &AppDeps,
@@ -180,6 +195,7 @@ async fn record_transition(
     reason: Option<String>,
     policy_version: Option<u64>,
     restore_active: bool,
+    compliance_ok: bool,
     now: DateTime<Utc>,
 ) -> Result<(), DomainError> {
     lifecycle::assert_transition(from, to)?;
@@ -209,6 +225,10 @@ async fn record_transition(
             };
             deps.commodity
                 .update_batch_state(tx, id, to, active)
+                .await?;
+            // 重算结论回写（Task 22）：仅批次有 compliance_ok 字段
+            deps.commodity
+                .update_batch_compliance(tx, id, compliance_ok)
                 .await?;
         }
         SubjectRef::Asset(id) => {
@@ -265,6 +285,7 @@ pub async fn recompute_compliance(
             Some(reason.clone()),
             None, // 召回不经 policy 批准（监管强制语义）
             false,
+            false, // 召回联动回写 compliance_ok = false
             now,
         )
         .await?;
@@ -287,25 +308,9 @@ pub async fn recompute_compliance(
 
     // 分支 2：凭证齐备且当前已召回 → 恢复门（policy 显式允许才放行）
     if compliant && cur == LifecycleState::Recalled {
-        // 归属者辖区/类目已在 assess 收敛；此处只需重取策略全集做恢复检核
-        let owner = &assessment.owner;
-        let doc = deps
-            .identity
-            .find_document(tx, owner)
-            .await?
-            .ok_or_else(|| {
-                DomainError::InvalidInput(format!("归属者 {owner} 的 DID 文档不存在"))
-            })?;
-        let jurisdiction = doc
-            .jurisdiction
-            .clone()
-            .ok_or_else(|| DomainError::InvalidInput(format!("归属者 {owner} 缺少辖区信息")))?;
-        let category = product_category_of(deps, tx, subject).await?;
-        let policies = deps
-            .policies
-            .policies_for(tx, &jurisdiction, &category)
-            .await?;
+        // 辖区/策略/凭证均复用 assess 已取数据（无重复查询）
         // 恢复门第一道：存在生效且声明 (Recalled, Available) 边的策略
+        let policies = &assessment.policies;
         let allows_restore = policies
             .iter()
             .any(|p| p.is_active(now) && p.allows_transition(
@@ -316,10 +321,9 @@ pub async fn recompute_compliance(
             // 恢复门第二道：引擎对该迁移的凭证核验（required_proofs 空
             // 集合按无证明要求处理；核验不过 → 保持 Recalled，不报错中断
             // ——撤销/签发主流程本身合法，恢复失败仅是联动结果）
-            let creds = deps.credentials.list_by_subject(tx, owner).await?;
             if let Ok(decision) = PolicyEngine::check_transition(
-                &policies,
-                &creds,
+                policies,
+                &assessment.creds,
                 &[],
                 LifecycleState::Recalled,
                 LifecycleState::Available,
@@ -338,6 +342,7 @@ pub async fn recompute_compliance(
                         Some("凭证补齐自动恢复".into()),
                         policy_version,
                         true,
+                        true, // 恢复联动回写 compliance_ok = true
                         now,
                     )
                     .await?;
@@ -359,7 +364,19 @@ pub async fn recompute_compliance(
                 }
             }
         }
-        // 无策略显式允许 / 核验未过 → 保持 Recalled（§59 重算语义）
+        // 无策略显式允许 / 核验未过 → 保持 Recalled（§59 重算语义）。
+        // 补一行闭环观测点：compliant:false 事件入 outbox（事务内），
+        // 避免恢复门静默吞错不可见。
+        deps.outbox
+            .append(
+                tx,
+                &aggregate,
+                &DomainEvent::ComplianceChanged {
+                    subject: subject.clone(),
+                    compliant: false,
+                },
+            )
+            .await?;
         return Ok(ComplianceOutcome {
             compliant: true,
             missing: vec![],

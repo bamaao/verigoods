@@ -178,6 +178,26 @@ impl CommodityRepository for PgCommodityRepo {
         Ok(())
     }
 
+    /// Task 22 合规重算结论回写：仅更新 `compliance_ok`；
+    /// 批次不存在（0 行命中）→ [`DomainError::NotFound`]。
+    async fn update_batch_compliance(
+        &self,
+        ctx: &mut Self::Context,
+        id: &BatchId,
+        compliance_ok: bool,
+    ) -> Result<(), DomainError> {
+        let result = sqlx::query("UPDATE batches SET compliance_ok = $2 WHERE id = $1")
+            .bind(id.as_ref())
+            .bind(compliance_ok)
+            .execute(&mut **ctx)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(DomainError::NotFound);
+        }
+        Ok(())
+    }
+
     /// 保存或整体替换单品资产（按 `a.id` 幂等，含 transfer_count/c2c_count）。
     async fn save_asset(&self, ctx: &mut Self::Context, a: &Asset) -> Result<(), DomainError> {
         sqlx::query(
@@ -555,6 +575,40 @@ mod tests {
                 LifecycleState::Produced,
                 true,
             )
+            .await
+            .expect_err("不存在的批次必须报 NotFound");
+        assert!(matches!(err, DomainError::NotFound), "{err:?}");
+
+        tx.commit().await.unwrap();
+    }
+
+    /// update_batch_compliance：compliance_ok 回写；不存在 → NotFound。
+    #[sqlx::test]
+    async fn update_batch_compliance_persists_flag(pool: sqlx::PgPool) {
+        let repo = PgCommodityRepo;
+        let mut tx = pool.begin().await.unwrap();
+
+        repo.save_product(&mut tx, &sample_product("p-16"))
+            .await
+            .unwrap();
+        let batch = sample_batch("b-cmp", 5);
+        repo.save_batch(&mut tx, &batch).await.unwrap();
+
+        repo.update_batch_compliance(&mut tx, &batch.id, true)
+            .await
+            .expect("合规回写应成功");
+        assert!(
+            repo.find_batch(&mut tx, &batch.id).await.unwrap().unwrap().compliance_ok
+        );
+        repo.update_batch_compliance(&mut tx, &batch.id, false)
+            .await
+            .unwrap();
+        assert!(
+            !repo.find_batch(&mut tx, &batch.id).await.unwrap().unwrap().compliance_ok
+        );
+
+        let err = repo
+            .update_batch_compliance(&mut tx, &BatchId::new("b-nope"), true)
             .await
             .expect_err("不存在的批次必须报 NotFound");
         assert!(matches!(err, DomainError::NotFound), "{err:?}");

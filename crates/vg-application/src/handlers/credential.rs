@@ -83,8 +83,7 @@ struct RevokePayload {
     subject: SubjectRef,
     /// 目标凭证。
     credential_id: CredentialId,
-    /// 撤销原因（进审计留痕，Phase1 不入领域事件体）。
-    #[allow(dead_code)] // 审计兜底字段：reason 语义由 intent 载荷自身留痕
+    /// 撤销原因（审计留痕：结构化日志一行；Phase1 不入领域事件体）。
     reason: Option<String>,
 }
 
@@ -200,6 +199,13 @@ impl IntentHandler for RevokeCredentialHandler {
     ) -> Result<HandlerOutcome, DomainError> {
         let payload: RevokePayload = parse_payload(intent)?;
         let actor = effective_principal(intent);
+
+        // 撤销原因审计留痕（Phase1 不入领域事件体，结构化日志兜底）
+        tracing::info!(
+            credential = %payload.credential_id,
+            reason = payload.reason.as_deref().unwrap_or(""),
+            "撤销凭证"
+        );
 
         // 领域状态机：仅签发方可撤销（非 issuer → Unauthorized）
         let mut vc = deps
@@ -496,6 +502,15 @@ mod tests {
             .unwrap()
     }
 
+    async fn batch_compliance(pool: &sqlx::PgPool, id: &str) -> bool {
+        let (ok,): (bool,) = sqlx::query_as("SELECT compliance_ok FROM batches WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        ok
+    }
+
     async fn cred_status(pool: &sqlx::PgPool, id: &str) -> String {
         let (s,): (String,) = sqlx::query_as("SELECT status FROM credentials WHERE id = $1")
             .bind(id)
@@ -594,6 +609,10 @@ mod tests {
         assert_eq!(cred_status(&pool, "vc-food-1").await, "revoked");
         // active 位不动（可售语义属 Delisted 开关），状态 → recalled
         assert_eq!(batch_state(&pool, "bt-food").await, (true, "recalled".into()));
+        assert!(
+            !batch_compliance(&pool, "bt-food").await,
+            "召回联动回写 compliance_ok = false"
+        );
         let mut evs = outbox_types(&pool, "c-2").await;
         evs.sort();
         assert_eq!(evs, vec!["credential_revoked", "product_recalled"]);
@@ -635,6 +654,10 @@ mod tests {
             batch_state(&pool, "bt-food").await,
             (true, "available".into()),
             "凭证补齐 + policy 恢复边 → 自动恢复 Available"
+        );
+        assert!(
+            batch_compliance(&pool, "bt-food").await,
+            "恢复联动回写 compliance_ok = true"
         );
         let mut evs = outbox_types(&pool, "c-3").await;
         evs.sort();
@@ -951,5 +974,111 @@ mod tests {
             1,
             "迁移事件不双发"
         );
+    }
+
+    /// 恢复门关闭：凭证齐全但策略无 (recalled, available) 恢复边 →
+    /// 保持 Recalled，且 outbox 出现 compliant:false 的 ComplianceChanged
+    /// 观测事件（闭环不静默）。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn restore_gate_closed_keeps_recalled_and_signals(pool: sqlx::PgPool) {
+        let (regulator, enterprise) = seed(&pool).await;
+        let eng = engine(pool.clone());
+
+        // 覆盖策略：同 (policy_id, version) 覆盖式 upsert，去掉恢复边
+        {
+            let mut tx = pool.begin().await.unwrap();
+            PgPolicyRepository
+                .save_policy(
+                    &mut tx,
+                    &Policy {
+                        policy_id: PolicyId::new("pol-food-safety"),
+                        version: 2,
+                        authority: regulator.clone(),
+                        jurisdiction: "CN".into(),
+                        product_type: "food".into(),
+                        required_credentials: vec![CredentialType::FoodSafetyInspection],
+                        required_proofs: vec![],
+                        transitions: vec![], // 恢复边移除
+                        effective_at: Utc::now() - chrono::Duration::days(1),
+                        expires_at: None,
+                        active: true,
+                    },
+                )
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+
+        // 签发 → 撤销（强制召回）
+        eng.execute(raw(
+            "g-1",
+            IntentAction::IssueCredential,
+            &regulator,
+            serde_json::json!({
+                "subject": batch_subject("bt-food"),
+                "holder": enterprise.to_string(),
+                "ctype": "food_safety_inspection",
+                "claims": {"result": "passed"},
+                "credential_id": "vc-gate-1"
+            }),
+        ))
+        .await
+        .unwrap();
+        eng.execute(raw(
+            "g-2",
+            IntentAction::RevokeCredential,
+            &regulator,
+            serde_json::json!({
+                "subject": batch_subject("bt-food"),
+                "credential_id": "vc-gate-1"
+            }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(batch_state(&pool, "bt-food").await, (true, "recalled".into()));
+
+        // 重签发 → 凭证齐备但无恢复边：保持 Recalled + compliant:false 事件
+        let reissue = eng
+            .execute(raw(
+                "g-3",
+                IntentAction::IssueCredential,
+                &regulator,
+                serde_json::json!({
+                    "subject": batch_subject("bt-food"),
+                    "holder": enterprise.to_string(),
+                    "ctype": "food_safety_inspection",
+                    "claims": {"result": "passed"},
+                    "credential_id": "vc-gate-2"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(reissue.status, IntentStatus::Confirmed);
+        assert_eq!(
+            batch_state(&pool, "bt-food").await,
+            (true, "recalled".into()),
+            "无策略恢复边 → 恢复门关闭，保持 Recalled"
+        );
+        assert!(
+            !batch_compliance(&pool, "bt-food").await,
+            "恢复未发生，compliance_ok 不回写为 true"
+        );
+        // 闭环观测点：outbox 出现 compliant:false 的 compliance_changed
+        let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT payload FROM domain_events WHERE aggregate = $1 ORDER BY id ASC",
+        )
+        .bind("intent:g-3")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let flags: Vec<bool> = rows
+            .iter()
+            .filter(|(p,)| p["event_type"].as_str() == Some("compliance_changed"))
+            .map(|(p,)| p["compliant"].as_bool().unwrap())
+            .collect();
+        assert_eq!(flags, vec![false], "恢复门静默拒绝必须留 compliant:false 事件");
+
+        // 生命周期只有一条召回迁移（无 restore）
+        assert_eq!(lifecycle_chain(&pool, "batch:bt-food").await.len(), 1);
     }
 }
