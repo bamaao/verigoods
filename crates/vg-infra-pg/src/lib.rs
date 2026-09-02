@@ -19,6 +19,7 @@
 //! - [`audit`]：审计事件写入，只增（Task 17）；
 //! - [`outbox`]：领域事件 outbox（Task 17，Task 23 索引器消费）。
 
+pub mod approvals;
 pub mod audit;
 pub mod commodity_repo;
 pub mod credential_repo;
@@ -32,6 +33,7 @@ pub mod policy_repo;
 pub mod pool;
 pub mod proof_store;
 
+pub use approvals::{ApprovalRow, PgApprovalsStore};
 pub use audit::{AuditEntry, PgAuditWriter};
 pub use commodity_repo::PgCommodityRepo;
 pub use credential_repo::PgCredentialRepo;
@@ -158,6 +160,7 @@ mod tests {
 
     /// 期望的全量表集合（不含 sqlx 自身的 `_sqlx_migrations`）。
     const EXPECTED_TABLES: &[&str] = &[
+        "approvals",
         "assets",
         "audit_events",
         "batch_lineage",
