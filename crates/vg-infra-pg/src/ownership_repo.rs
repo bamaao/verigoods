@@ -138,6 +138,29 @@ impl OwnershipRepository for PgOwnershipRepo {
         Ok(())
     }
 
+    /// 按主体查询当前保管状态；不存在返回 `Ok(None)`。
+    async fn get_custody(
+        &self,
+        ctx: &mut Self::Context,
+        subject: &SubjectRef,
+    ) -> Result<Option<CustodyState>, DomainError> {
+        let row = sqlx::query(
+            "SELECT subject, custodian, since FROM custody_states WHERE subject = $1",
+        )
+        .bind(encode_subject(subject))
+        .fetch_optional(&mut **ctx)
+        .await
+        .map_err(storage)?;
+        row.map(|r| {
+            Ok(CustodyState {
+                subject: decode_subject(r.get("subject"))?,
+                custodian: parse_did(r.get("custodian"))?,
+                since: r.get("since"),
+            })
+        })
+        .transpose()
+    }
+
     /// 追加转移审计记录：`record_id` 唯一约束 + `ON CONFLICT DO NOTHING`
     /// 承载按 `record.id` 的幂等（同 id 重复提交不产生新条目）。
     async fn record_transfer(

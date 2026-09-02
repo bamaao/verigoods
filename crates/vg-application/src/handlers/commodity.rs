@@ -21,7 +21,7 @@ use vg_domain::shared::{BatchId, Did, DomainError, Hash32, ProductId, SubjectRef
 use crate::deps::{AppDeps, PgTx};
 use crate::handlers::{
     enforce_transition_policy, jurisdiction_of, parse_payload, record_lifecycle_transition,
-    subject_label,
+    require_owner, subject_label,
 };
 use crate::intent_engine::{HandlerOutcome, IntentHandler};
 
@@ -244,11 +244,10 @@ impl IntentHandler for SplitBatchHandler {
             .collect();
         let outcome = parent.split(&children, now)?;
 
-        // 子批所有权跟随父批当前 owner（无档案时退回 producer）
-        let child_owner = match deps.ownership.get(tx, &payload.subject).await? {
-            Some(state) => state.owner,
-            None => parent.producer.clone(),
-        };
+        // 授权闸门：拆分是所有权处分行为——effective principal 必须是
+        // 父批当前 owner；子批所有权随之继承（不再退回 producer：无档案
+        // 即异常数据，拒绝拆分）。
+        let child_owner = require_owner(deps, tx, intent, &payload.subject).await?;
 
         // ---- 落库段 ----
         deps.commodity.save_batch(tx, &parent).await?;
@@ -315,7 +314,9 @@ struct MergeBatchPayload {
 ///
 /// 领域 `Batch::merge` 承担同源/有效/守恒裁决；新批 `producer` 取首父批
 /// producer（merge 已校验全部父批 producer 一致）。与拆分同理：**不改变
-/// 生命周期状态、不触发 policy**。新批所有权跟随首父批当前 owner。
+/// 生命周期状态、不触发 policy**。新批所有权跟随父批 owner——授权闸门
+/// 对**每个父批**逐一校验 effective principal == owner，任一父批属他人
+/// 即 Unauthorized（防借合并吞噬他人所有权）。
 pub struct MergeBatchHandler;
 
 #[async_trait]
@@ -340,8 +341,15 @@ impl IntentHandler for MergeBatchHandler {
         if payload.children.is_empty() {
             return Err(DomainError::InvalidInput("合并至少需要一个父批次".into()));
         }
+        // M2：subject 是审计资源兜底，必须与业务产物 new_batch_id 一致
+        if payload.subject != SubjectRef::Batch(payload.new_batch_id.clone()) {
+            return Err(DomainError::InvalidInput(
+                "MergeBatch 的 subject 必须指向合并产物（subject.id == new_batch_id）".into(),
+            ));
+        }
 
         let mut parents = Vec::with_capacity(payload.children.len());
+        let mut new_owner: Option<Did> = None;
         for id in &payload.children {
             parents.push(
                 deps.commodity
@@ -349,12 +357,16 @@ impl IntentHandler for MergeBatchHandler {
                     .await?
                     .ok_or(DomainError::NotFound)?,
             );
+            // 授权闸门（对每个父批）：合并会吞噬父批所有权——任一父批
+            // 不属于 effective principal 即整体拒绝，不得借合并吞他人批次。
+            let owner =
+                require_owner(deps, tx, intent, &SubjectRef::Batch(id.clone())).await?;
+            if new_owner.is_none() {
+                new_owner = Some(owner);
+            }
         }
-        let first_subject = SubjectRef::Batch(payload.children[0].clone());
-        let new_owner = match deps.ownership.get(tx, &first_subject).await? {
-            Some(state) => state.owner,
-            None => parents[0].producer.clone(),
-        };
+        // 每个父批都通过了 owner == principal 闸门 → 所有父批同主
+        let new_owner = new_owner.expect("children 非空则 new_owner 必有值");
         let producer = parents[0].producer.clone();
 
         let outcome = vg_domain::commodity::Batch::merge(

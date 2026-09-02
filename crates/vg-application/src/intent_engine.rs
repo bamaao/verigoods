@@ -623,14 +623,13 @@ fn result_of(intent: &Intent, awaiting_approval: bool) -> IntentResult {
 fn deny_resource(intent: &Intent) -> String {
     match intent.payload.get("subject") {
         Some(Value::String(s)) => s.clone(),
-        Some(Value::Object(map)) => {
-            let kind = map.get("type").and_then(Value::as_str);
-            let id = map.get("id").and_then(Value::as_str);
-            match (kind, id) {
-                (Some(k), Some(i)) if !k.is_empty() && !i.is_empty() => format!("{k}:{i}"),
-                _ => intent.action.as_str().to_string(),
-            }
-        }
+        // 对象形复用 SubjectRef 的 Deserialize（含 type 标签校验），
+        // 编码口径与 handler/infra 的 subject_label 单一化；
+        // 形态不符（未知 type / 缺字段）回退动作名。
+        Some(v) => match serde_json::from_value::<vg_domain::shared::SubjectRef>(v.clone()) {
+            Ok(subject) => crate::handlers::subject_label(&subject),
+            Err(_) => intent.action.as_str().to_string(),
+        },
         _ => intent.action.as_str().to_string(),
     }
 }

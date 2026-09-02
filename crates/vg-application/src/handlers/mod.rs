@@ -50,6 +50,50 @@ pub(crate) fn subject_label(subject: &SubjectRef) -> String {
     }
 }
 
+/// 操作的资源归属主体：`on_behalf_of` 优先（Agent 代发时为被代理企业
+/// ——engine 授权段已锁定 on_behalf_of == 挂靠 parent），否则为发起人。
+///
+/// 所有权类授权判定（[`require_owner`]）统一以该口径比对 owner，
+/// 防止"持能力即可转走他人商品"的越权。
+pub(crate) fn effective_principal(intent: &vg_domain::intent::Intent) -> Did {
+    intent
+        .on_behalf_of
+        .clone()
+        .unwrap_or_else(|| intent.actor.clone())
+}
+
+/// 所有权授权闸门：effective principal 必须是 subject 的当前 owner。
+///
+/// - 所有权档案缺失 → [`DomainError::InvalidInput`]（主体尚未建档）；
+/// - principal != owner → [`DomainError::Unauthorized`]（越权操作他人资源）；
+/// - 通过 → 返回 owner（调用方可直接用作转移前 owner 等语义）。
+pub(crate) async fn require_owner(
+    deps: &AppDeps,
+    tx: &mut PgTx,
+    intent: &vg_domain::intent::Intent,
+    subject: &SubjectRef,
+) -> Result<Did, DomainError> {
+    let principal = effective_principal(intent);
+    let owner = deps
+        .ownership
+        .get(tx, subject)
+        .await?
+        .ok_or_else(|| {
+            DomainError::InvalidInput(format!(
+                "主体 {} 尚未建立所有权档案",
+                subject_label(subject)
+            ))
+        })?
+        .owner;
+    if principal != owner {
+        return Err(DomainError::Unauthorized(format!(
+            "{principal} 无权操作 {}（owner={owner}）",
+            subject_label(subject)
+        )));
+    }
+    Ok(owner)
+}
+
 /// payload → 强类型（`deny_unknown_fields` 由各 struct 自带）。
 ///
 /// 违规 → [`DomainError::InvalidInput`]（业务拒绝而非调用方 Err：
@@ -150,7 +194,14 @@ pub(crate) async fn enforce_transition_policy(
 
 /// 生命周期迁移落库四件套（policy 检核后的公共后段）：
 /// `assert_transition` → lifecycle 事件追加（事件 ID 派生自 intent，幂等）
-/// → 批次/单品聚合状态回写（`active` 不变——迁移不失效档案）。
+/// → 批次/单品聚合状态回写。
+///
+/// **`active` 口径（doc 锁定）**：`active` 语义 = 可售，与 `Delisted`
+/// 状态部分冗余——下架事实由状态承载，本段做读-改-写而非恒置 true：
+/// - 迁入 `Available` → `active = true`（重新上架语义）；
+/// - 迁入 `Delisted` → `active = false`（下架）；
+/// - 其余迁移保留当前 `active`（不隐式复活，也不掩盖 split 置 false 的
+///   父批——split 不触发迁移，但任何非上/下架迁移均不得篡改失效位）。
 ///
 /// `policy_version` 取 enforced 最后一条（与 engine 审计列同口径）。
 #[allow(clippy::too_many_arguments)]
@@ -180,7 +231,17 @@ pub(crate) async fn record_lifecycle_transition(
     deps.lifecycle.append(tx, &event).await?;
     match subject {
         SubjectRef::Batch(id) => {
-            deps.commodity.update_batch_state(tx, id, to, true).await?;
+            let current = deps
+                .commodity
+                .find_batch(tx, id)
+                .await?
+                .ok_or(DomainError::NotFound)?;
+            let active = match to {
+                LifecycleState::Available => true,
+                LifecycleState::Delisted => false,
+                _ => current.active,
+            };
+            deps.commodity.update_batch_state(tx, id, to, active).await?;
         }
         SubjectRef::Asset(id) => {
             let mut asset = deps
@@ -1154,6 +1215,355 @@ mod tests {
                 .rejection
                 .as_deref()
                 .is_some_and(|x| x.contains("所有权档案"))
+        );
+    }
+
+    // ---- C1/C2/I2：授权闸门与 active 口径 ----
+
+    /// 带证书的第三方（持 TransferOwnership）不得转走他人批次。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn transfer_by_non_owner_rejected(pool: sqlx::PgPool) {
+        let owner = did("did:vg:user:ent-own-a");
+        let attacker = did("did:vg:user:ent-attacker");
+        use vg_domain::identity::capability::Action as Cap;
+        seed_enterprise(&pool, &owner, &[Cap::CreateBatch, Cap::TransferOwnership]).await;
+        // 攻击者自身手续齐全：DID 文档 + TransferOwnership 能力
+        seed_enterprise(&pool, &attacker, &[Cap::TransferOwnership]).await;
+        seed_product(&pool, "pd-pork").await;
+        let eng = engine(pool.clone());
+
+        eng.execute(raw(
+            "a-0",
+            IntentAction::CreateBatch,
+            &owner,
+            serde_json::json!({
+                "subject": batch_subject("bt-a"), "product_id": "pd-pork",
+                "quantity": 10, "unit": "kg"
+            }),
+        ))
+        .await
+        .unwrap();
+
+        let r = eng
+            .execute(raw(
+                "a-1",
+                IntentAction::TransferProduct,
+                &attacker,
+                serde_json::json!({
+                    "subject": batch_subject("bt-a"),
+                    "to": attacker.to_string(), "c2c": false
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status, IntentStatus::Rejected);
+        assert!(
+            r.rejection.as_deref().is_some_and(|x| x.contains("无权操作")),
+            "实际：{:?}",
+            r.rejection
+        );
+        // 零副作用：owner 与计数不变、零转移流水
+        assert_eq!(
+            ownership_row(&pool, "batch:bt-a").await,
+            (owner.to_string(), 0, 0)
+        );
+        let n: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM transfers WHERE subject = 'batch:bt-a'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(n.0, 0);
+    }
+
+    /// Agent 代发（parent=owner 企业、on_behalf_of=企业）：effective
+    /// principal 命中 owner，转移放行。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn agent_on_behalf_of_owner_transfers(pool: sqlx::PgPool) {
+        let enterprise = did("did:vg:user:ent-agented");
+        let agent = did("did:vg:agent:ag-1");
+        let buyer = did("did:vg:user:buyer-agented");
+        use vg_domain::identity::capability::Action as Cap;
+        seed_enterprise(&pool, &enterprise, &[Cap::CreateBatch]).await;
+        // Agent 文档（挂靠企业）+ 自持 TransferOwnership 能力
+        {
+            let mut tx = pool.begin().await.unwrap();
+            PgIdentityRepo
+                .save_document(
+                    &mut tx,
+                    &doc(agent.clone(), SubjectKind::Agent, Some(enterprise.clone()), Some("CN".into())),
+                )
+                .await
+                .unwrap();
+            let grantor = did("did:vg:user:grantor-t20");
+            PgIdentityRepo
+                .grant_capability(
+                    &mut tx,
+                    &Capability::new(agent.clone(), Cap::TransferOwnership, grantor, None).unwrap(),
+                )
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+        seed_product(&pool, "pd-pork").await;
+        let eng = engine(pool.clone());
+
+        eng.execute(raw(
+            "g-0",
+            IntentAction::CreateBatch,
+            &enterprise,
+            serde_json::json!({
+                "subject": batch_subject("bt-ag"), "product_id": "pd-pork",
+                "quantity": 10, "unit": "kg"
+            }),
+        ))
+        .await
+        .unwrap();
+
+        let mut ri = raw(
+            "g-1",
+            IntentAction::TransferProduct,
+            &agent,
+            serde_json::json!({
+                "subject": batch_subject("bt-ag"),
+                "to": buyer.to_string(), "c2c": false
+            }),
+        );
+        ri.on_behalf_of = Some(enterprise.clone());
+        let r = eng.execute(ri).await.unwrap();
+        assert_eq!(r.status, IntentStatus::Confirmed);
+        assert_eq!(
+            ownership_row(&pool, "batch:bt-ag").await,
+            (buyer.to_string(), 1, 0)
+        );
+    }
+
+    /// 保管链条交接：custodian（非 owner）可 UpdateCustody 交接，
+    /// 但 TransferProduct 被拒（owner 专属）。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn custodian_can_handover_but_not_transfer(pool: sqlx::PgPool) {
+        let enterprise = did("did:vg:user:ent-cust");
+        let inspector = did("did:vg:user:inspector-cust");
+        let logistics = did("did:vg:user:logistics-cust");
+        use vg_domain::identity::capability::Action as Cap;
+        seed_enterprise(
+            &pool,
+            &enterprise,
+            &[Cap::CreateBatch, Cap::TransferOwnership, Cap::UpdateCustody],
+        )
+        .await;
+        seed_enterprise(&pool, &inspector, &[Cap::UpdateCustody, Cap::TransferOwnership]).await;
+        seed_product(&pool, "pd-pork").await;
+        let eng = engine(pool.clone());
+        let subject = batch_subject("bt-cu");
+
+        eng.execute(raw(
+            "c-0",
+            IntentAction::CreateBatch,
+            &enterprise,
+            serde_json::json!({
+                "subject": subject, "product_id": "pd-pork", "quantity": 5, "unit": "kg"
+            }),
+        ))
+        .await
+        .unwrap();
+        // owner 把保管交给检测机构
+        eng.execute(raw(
+            "c-1",
+            IntentAction::UpdateCustody,
+            &enterprise,
+            serde_json::json!({
+                "subject": subject, "to": inspector.to_string(), "reason": "handover"
+            }),
+        ))
+        .await
+        .unwrap();
+
+        // custodian（检测机构）沿链条交接给物流 → 放行
+        let handover = eng
+            .execute(raw(
+                "c-2",
+                IntentAction::UpdateCustody,
+                &inspector,
+                serde_json::json!({
+                    "subject": subject, "to": logistics.to_string(), "reason": "ship"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(handover.status, IntentStatus::Confirmed);
+        let custodian: (String,) =
+            sqlx::query_as("SELECT custodian FROM custody_states WHERE subject = 'batch:bt-cu'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(custodian.0, logistics.to_string());
+
+        // custodian 试图转移所有权 → 拒绝
+        let steal = eng
+            .execute(raw(
+                "c-3",
+                IntentAction::TransferProduct,
+                &inspector,
+                serde_json::json!({
+                    "subject": subject, "to": inspector.to_string(), "c2c": false
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(steal.status, IntentStatus::Rejected);
+        assert!(steal.rejection.as_deref().is_some_and(|x| x.contains("无权操作")));
+        assert_eq!(
+            ownership_row(&pool, "batch:bt-cu").await,
+            (enterprise.to_string(), 0, 0)
+        );
+    }
+
+    /// 合并吞噬他人批次：任一父批 owner 不符 → Unauthorized 整体拒绝。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn merge_cross_owner_rejected(pool: sqlx::PgPool) {
+        let ent_a = did("did:vg:user:ent-ma");
+        let ent_b = did("did:vg:user:ent-mb");
+        use vg_domain::identity::capability::Action as Cap;
+        seed_enterprise(&pool, &ent_a, &[Cap::CreateBatch]).await;
+        seed_enterprise(&pool, &ent_b, &[Cap::CreateBatch]).await;
+        seed_product(&pool, "pd-pork").await;
+        let eng = engine(pool.clone());
+
+        for (intent, actor, id) in [
+            ("x-a", &ent_a, "bt-o1"),
+            ("x-b", &ent_b, "bt-o2"),
+        ] {
+            eng.execute(raw(
+                intent,
+                IntentAction::CreateBatch,
+                actor,
+                serde_json::json!({
+                    "subject": batch_subject(id), "product_id": "pd-pork",
+                    "quantity": 10, "unit": "kg"
+                }),
+            ))
+            .await
+            .unwrap();
+        }
+
+        // ent_b 合并 [ent_a 的 bt-o1, 自己的 bt-o2] → 拒绝
+        let r = eng
+            .execute(raw(
+                "x-merge",
+                IntentAction::MergeBatch,
+                &ent_b,
+                serde_json::json!({
+                    "subject": batch_subject("bt-om"),
+                    "children": ["bt-o1", "bt-o2"],
+                    "new_batch_id": "bt-om"
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status, IntentStatus::Rejected);
+        assert!(r.rejection.as_deref().is_some_and(|x| x.contains("无权操作")));
+        // 零副作用：两父批仍有效、新批不落库
+        assert_eq!(batch_active_state(&pool, "bt-o1").await, (true, "created".into()));
+        assert_eq!(batch_active_state(&pool, "bt-o2").await, (true, "created".into()));
+        let none: (i64,) = sqlx::query_as("SELECT count(*) FROM batches WHERE id = 'bt-om'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(none.0, 0);
+    }
+
+    /// I2 active 口径：Available→Delisted 后 active=false，
+    /// Delisted→Available 后 active=true（重新上架）。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn delisted_available_active_semantics(pool: sqlx::PgPool) {
+        let enterprise = did("did:vg:user:ent-dl");
+        let inspector = did("did:vg:user:inspector-dl");
+        use vg_domain::identity::capability::Action as Cap;
+        seed_enterprise(
+            &pool,
+            &enterprise,
+            &[Cap::CreateBatch, Cap::TransferOwnership, Cap::UpdateCustody],
+        )
+        .await;
+        seed_product(&pool, "pd-pork").await;
+        seed_policies(&pool).await;
+        seed_vc(&pool, CredentialType::ProductionLicense, &enterprise).await;
+        seed_vc(&pool, CredentialType::QualityInspection, &enterprise).await;
+        let eng = engine(pool.clone());
+        let subject = batch_subject("bt-dl");
+
+        // 铺路到 Available：produced → inspected → in_transit → available
+        eng.execute(raw(
+            "d-0",
+            IntentAction::CreateBatch,
+            &enterprise,
+            serde_json::json!({
+                "subject": subject, "product_id": "pd-pork", "quantity": 5,
+                "unit": "kg", "target_state": "produced"
+            }),
+        ))
+        .await
+        .unwrap();
+        // 保管人不与现任重复（apply_update 自转守卫），逐手换人
+        let logistics = did("did:vg:user:logistics-dl");
+        let retailer = did("did:vg:user:retailer-dl");
+        let back = did("did:vg:user:back-dl");
+        for (intent, to, lifecycle) in [
+            ("d-1", inspector.to_string(), "inspected"),
+            ("d-2", logistics.to_string(), "in_transit"),
+            ("d-3", retailer.to_string(), "available"),
+        ] {
+            eng.execute(raw(
+                intent,
+                IntentAction::UpdateCustody,
+                &enterprise,
+                serde_json::json!({
+                    "subject": subject, "to": to,
+                    "reason": "warehouse_in", "lifecycle_to": lifecycle
+                }),
+            ))
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            batch_active_state(&pool, "bt-dl").await,
+            (true, "available".into())
+        );
+
+        // 下架：Available→Delisted，active 置 false
+        eng.execute(raw(
+            "d-4",
+            IntentAction::UpdateCustody,
+            &enterprise,
+            serde_json::json!({
+                "subject": subject, "to": back.to_string(),
+                "reason": "warehouse_in", "lifecycle_to": "delisted"
+            }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            batch_active_state(&pool, "bt-dl").await,
+            (false, "delisted".into()),
+            "下架后 active 必须为 false"
+        );
+
+        // 重新上架：Delisted→Available，active 恢复 true
+        eng.execute(raw(
+            "d-5",
+            IntentAction::UpdateCustody,
+            &enterprise,
+            serde_json::json!({
+                "subject": subject, "to": retailer.to_string(),
+                "reason": "warehouse_in", "lifecycle_to": "available"
+            }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            batch_active_state(&pool, "bt-dl").await,
+            (true, "available".into()),
+            "重新上架后 active 必须恢复 true"
         );
     }
 }

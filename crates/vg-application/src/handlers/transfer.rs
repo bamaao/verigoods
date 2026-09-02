@@ -23,8 +23,8 @@ use vg_domain::shared::{Did, DomainError, SubjectRef};
 
 use crate::deps::{AppDeps, PgTx};
 use crate::handlers::{
-    enforce_transition_policy, jurisdiction_of, parse_payload, product_category_of,
-    record_lifecycle_transition, subject_label,
+    effective_principal, enforce_transition_policy, jurisdiction_of, parse_payload,
+    product_category_of, record_lifecycle_transition, require_owner, subject_label,
 };
 use crate::intent_engine::{HandlerOutcome, IntentHandler};
 
@@ -69,7 +69,8 @@ struct CustodySpec {
 
 /// 公开转移处理器（L3）。
 ///
-/// 管道：所有权档案读取（未建档 → InvalidInput）→ 可选 lifecycle 迁移的
+/// 管道：所有权授权闸门（effective principal == 当前 owner，未建档 →
+/// InvalidInput、越权 → Unauthorized）→ 可选 lifecycle 迁移的
 /// policy 检核（辖区 = **转移前 owner** 的辖区，凭证 = 转移前 owner 的
 /// VC）→ `OwnershipState::transfer`（自转/溢出领域校验）→ save +
 /// `record_transfer`（幂等键 `tr:<intent_id>`）→ 可选 lifecycle 事件 +
@@ -91,6 +92,10 @@ impl IntentHandler for TransferPublicHandler {
     ) -> Result<HandlerOutcome, DomainError> {
         let payload: TransferPayload = parse_payload(intent)?;
 
+        // 授权闸门：effective principal（on_behalf_of 优先）必须是当前
+        // owner——能力校验（engine 段）只证明"可发起转移"，不证明"可转
+        // 这一件"；通过则返回值即转移前 owner。
+        let from_owner = require_owner(deps, tx, intent, &payload.subject).await?;
         let mut ownership = deps
             .ownership
             .get(tx, &payload.subject)
@@ -101,7 +106,6 @@ impl IntentHandler for TransferPublicHandler {
                     subject_label(&payload.subject)
                 ))
             })?;
-        let from_owner = ownership.owner.clone();
 
         // 可选生命周期迁移：policy（辖区/凭证均取转移前 owner）→ 状态机。
         // 当前状态取事件日志终态；无任何事件的建档批次退回 Created
@@ -109,6 +113,8 @@ impl IntentHandler for TransferPublicHandler {
         let mut enforced = Vec::new();
         let mut transition: Option<(LifecycleState, LifecycleState)> = None;
         if let Some(to_state) = payload.lifecycle_to {
+            // 事件日志为真相来源；无事件 = 建档态 Created（建档不是迁移，
+            // 批次档案 state 字段与事件日志同源）。
             let from_state = deps
                 .lifecycle
                 .current_state(tx, &payload.subject)
@@ -153,7 +159,7 @@ impl IntentHandler for TransferPublicHandler {
         }
 
         if let Some(spec) = &payload.custody {
-            let prev = current_custodian(tx, &payload.subject).await?;
+            let prev = current_custodian(deps, tx, &payload.subject).await?;
             apply_custody(deps, tx, &payload.subject, &spec.to, spec.reason, now).await?;
             deps.outbox
                 .append(
@@ -252,21 +258,35 @@ impl IntentHandler for UpdateCustodyHandler {
     ) -> Result<HandlerOutcome, DomainError> {
         let payload: CustodyPayload = parse_payload(intent)?;
 
+        // 授权闸门（owner **或** 现任 custodian，与 transfer 的 owner
+        // 专属闸门不同）：owner 全程可管保管；custodian 只能沿链条交接
+        // （检测机构 → 物流），且无法借本动作染指所有权——转移所有权
+        // 走 TransferProduct 的 require_owner。
+        let principal = effective_principal(intent);
+        let owner = deps
+            .ownership
+            .get(tx, &payload.subject)
+            .await?
+            .ok_or_else(|| {
+                DomainError::InvalidInput(format!(
+                    "主体 {} 尚未建立所有权档案",
+                    subject_label(&payload.subject)
+                ))
+            })?
+            .owner;
+        let prev = current_custodian(deps, tx, &payload.subject).await?;
+        if principal != owner && prev.as_ref() != Some(&principal) {
+            return Err(DomainError::Unauthorized(format!(
+                "{principal} 无权操作 {}（owner={owner}）",
+                subject_label(&payload.subject)
+            )));
+        }
+
         // 可选迁移：辖区/凭证取 subject 当前 owner
         let mut enforced = Vec::new();
         let mut transition: Option<(LifecycleState, LifecycleState)> = None;
         if let Some(to_state) = payload.lifecycle_to {
-            let owner = deps
-                .ownership
-                .get(tx, &payload.subject)
-                .await?
-                .ok_or_else(|| {
-                    DomainError::InvalidInput(format!(
-                        "主体 {} 无所有权档案，无法裁决伴随迁移的策略辖区",
-                        subject_label(&payload.subject)
-                    ))
-                })?
-                .owner;
+            // 事件日志为真相来源；无事件 = 建档态 Created。
             let from_state = deps
                 .lifecycle
                 .current_state(tx, &payload.subject)
@@ -289,7 +309,6 @@ impl IntentHandler for UpdateCustodyHandler {
         }
 
         // ---- 落库段（无锚定：custody 不上链，Phase1 口径）----
-        let prev = current_custodian(tx, &payload.subject).await?;
         apply_custody(deps, tx, &payload.subject, &payload.to, payload.reason, now).await?;
         deps.outbox
             .append(
@@ -331,22 +350,17 @@ impl IntentHandler for UpdateCustodyHandler {
     }
 }
 
-/// 读取当前保管人（读侧直查补缺：ownership 端口只有写侧 upsert，
-/// 无 custody 读取方法——Phase1 以本函数绕行，Task 21+ 如需再上升为端口）。
-async fn current_custodian(tx: &mut PgTx, subject: &SubjectRef) -> Result<Option<Did>, DomainError> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT custodian FROM custody_states WHERE subject = $1",
-    )
-    .bind(subject_label(subject))
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(|e| DomainError::Storage(e.to_string()))?;
-    match row {
-        Some((raw,)) => Did::parse(&raw)
-            .map(Some)
-            .map_err(|e| DomainError::Storage(format!("custody_states.custodian 损坏：{e}"))),
-        None => Ok(None),
-    }
+/// 读取当前保管人（经 ownership 端口的 `get_custody` 读侧，不再直查 SQL）。
+async fn current_custodian(
+    deps: &AppDeps,
+    tx: &mut PgTx,
+    subject: &SubjectRef,
+) -> Result<Option<Did>, DomainError> {
+    Ok(deps
+        .ownership
+        .get_custody(tx, subject)
+        .await?
+        .map(|c| c.custodian))
 }
 
 /// 保管 upsert：读取现任 → [`CustodyState::apply_update`]（前手校验 +
@@ -361,7 +375,7 @@ async fn apply_custody(
 ) -> Result<(), DomainError> {
     let update = CustodyUpdate {
         subject: subject.clone(),
-        from: current_custodian(tx, subject).await?,
+        from: current_custodian(deps, tx, subject).await?,
         to: to.clone(),
         reason,
     };
