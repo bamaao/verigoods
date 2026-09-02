@@ -1,18 +1,15 @@
 //! vg-api bin：bootstrap 顺序（plan 定案）：
 //! dotenvy（经 `Config::from_env`）→ tracing → PgPool connect + migrate
 //! → `AppDeps` 装配（按 `VG_PROVER` 选 Prover）→ `IntentEngine`
-//! → Router + VG-SIG 中间件 → serve（BIND_ADDR，ctrl-c 优雅关停）。
+//! → `build_router`（lib）→ serve（BIND_ADDR，ctrl-c / SIGTERM 优雅关停）。
+//!
+//! Router 组装在 [`vg_api::build_router`]（main 只 bootstrap + serve）。
 
 use std::sync::Arc;
 
-use axum::middleware::from_fn_with_state;
-use axum::routing::get;
-use axum::Router;
 use tracing_subscriber::EnvFilter;
 
 use vg_api::config::{Config, ProverKind};
-use vg_api::middleware::auth::vg_sig_auth;
-use vg_api::routes::health;
 use vg_api::state::{AppState, SharedState};
 use vg_application::{AppDeps, HandlerMap, IntentEngine};
 use vg_infra_pg::{
@@ -71,28 +68,49 @@ async fn main() {
     vg_application::register_default(&mut handlers);
     let engine = IntentEngine::new(deps, handlers);
 
-    // 共享状态 + 路由
+    // 共享状态 + 路由（组装见 lib::build_router）
     let state: SharedState = Arc::new(AppState {
         engine,
         pool,
         nonce_store: vg_api::NonceStore::new(),
     });
-    let app = Router::new()
-        .route("/health", get(health::health))
-        // Task 24：业务路由（/api/v1/*）在此挂载（engine 经 state 注入）
-        .layer(from_fn_with_state(state.clone(), vg_sig_auth))
-        .with_state(state);
+    let app = vg_api::build_router(state);
 
-    // serve + ctrl-c 优雅关停
+    // serve + 优雅关停（ctrl-c / Unix SIGTERM）
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await
         .unwrap_or_else(|e| panic!("监听 {bind} 失败：{e}", bind = config.bind_addr));
     tracing::info!(addr = %config.bind_addr, "vg-api 已启动");
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("收到 ctrl-c，开始优雅关停");
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap_or_else(|e| panic!("服务异常退出：{e}"));
+}
+
+/// 优雅关停信号：ctrl-c（全平台）与 Unix SIGTERM（`#[cfg(unix)]`，
+/// Windows 编译时该分支不存在，仅剩 ctrl-c）。
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "SIGTERM 监听注册失败，仅响应 ctrl-c");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("收到 ctrl-c，开始优雅关停"),
+        _ = terminate => tracing::info!("收到 SIGTERM，开始优雅关停"),
+    }
 }

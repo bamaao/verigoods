@@ -95,6 +95,12 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let message = match &self {
             Self::IntentNotFound(id) => format!("意图未找到：{id}"),
+            // Storage 错误的原始消息可能携带 DSN/SQL 细节等敏感信息：
+            // 响应体一律脱敏为通用文案，原始消息仅进服务端日志
+            Self::Domain(DomainError::Storage(original)) => {
+                tracing::error!(code = "storage", original = %original, "内部存储错误（响应体已脱敏）");
+                "内部存储错误".to_owned()
+            }
             Self::Domain(e) => e.to_string(),
         };
         (
@@ -149,7 +155,7 @@ mod tests {
     }
 
     /// 响应体结构：{code, message}（无 intent_id 字段）。
-#[tokio::test]
+    #[tokio::test]
     async fn body_is_code_and_message() {
         let resp = ApiError::Domain(DomainError::NotFound).into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -163,7 +169,7 @@ mod tests {
     }
 
     /// AppError::IntentNotFound → 404 且 code=intent_not_found。
-#[tokio::test]
+    #[tokio::test]
     async fn intent_not_found_maps_to_404() {
         let resp = ApiError::from(AppError::intent_not_found("it-1")).into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -173,6 +179,23 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["code"], "intent_not_found");
         assert_eq!(v["message"], "意图未找到：it-1");
+    }
+
+    /// Storage 变体：响应体为通用文案，不得泄露原始消息。
+    #[tokio::test]
+    async fn storage_error_body_is_sanitized() {
+        let secret = "postgres://user:pass@db.internal:5432/x 连接失败";
+        let resp = ApiError::Domain(DomainError::Storage(secret.into())).into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["code"], "storage");
+        assert_eq!(v["message"], "内部存储错误");
+        assert!(!text.contains("db.internal"), "原始消息子串不得出现在响应体");
+        assert!(!text.contains("连接失败"), "原始消息子串不得出现在响应体");
     }
 
     /// 普通领域错误经 AppError 透传保持原状态码。

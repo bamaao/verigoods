@@ -15,7 +15,8 @@
 //!
 //! ## 验证流程
 //!
-//! 1. 白名单直通：`/health`，或 `GET /api/v1/consumer/*`（只读免签，
+//! 1. 白名单直通：`/health`，或 `GET /api/v1/consumer`、
+//!    `GET /api/v1/consumer/*`（精确段匹配，排除前缀碰撞路径；只读免签，
 //!    不注入 `AuthedDid`）；
 //! 2. 解析 `VG-SIG` 头：`did="...", sig="0x...", ts=..., nonce="..."`，
 //!    各字段严格格式校验（防注入）：did=`did:vg:`+64hex、sig=0x+130hex、
@@ -84,43 +85,60 @@ pub async fn vg_sig_auth(
     let uri: Uri = req.uri().clone();
     let path = uri.path().to_owned();
 
-    // 白名单：/health 与 consumer 只读
-    if path == "/health" || (path.starts_with("/api/v1/consumer") && method == Method::GET) {
+    // 白名单：/health 与 consumer 只读（精确段匹配：段本身或段内子路径，
+    // 排除 /api/v1/consumer-admin、/api/v1/consumerfoo 等前缀碰撞）
+    if path == "/health"
+        || (method == Method::GET
+            && (path == "/api/v1/consumer" || path.starts_with("/api/v1/consumer/")))
+    {
         return next.run(req).await;
     }
 
-    // 解析 + 校验头
-    let header = req
-        .headers()
-        .get("VG-SIG")
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_sig_header)
-        .ok_or_else(|| ApiError::unauthorized("VG-SIG 头缺失或格式非法"));
-
-    let header = match header {
-        Ok(h) => h,
-        Err(e) => return e.into_response(),
+    // 解析 + 校验头（VG-SIG 头必须恰好出现一次；重复出现视为注入尝试 → 401）
+    let mut sig_values = req.headers().get_all("VG-SIG").iter();
+    let raw = match (sig_values.next(), sig_values.next()) {
+        (Some(v), None) => v.to_str(),
+        _ => {
+            tracing::warn!(%path, reason = "header_missing_or_duplicated", "鉴权拒绝：VG-SIG 头缺失或重复出现");
+            return ApiError::unauthorized("VG-SIG 头缺失或格式非法").into_response();
+        }
+    };
+    let header = match raw.ok().and_then(parse_sig_header) {
+        Some(h) => h,
+        None => {
+            tracing::warn!(%path, reason = "header_malformed", "鉴权拒绝：VG-SIG 头格式非法");
+            return ApiError::unauthorized("VG-SIG 头缺失或格式非法").into_response();
+        }
     };
 
     // ts 漂移检查
     let now = chrono::Utc::now().timestamp();
     if (now - header.ts).abs() > MAX_CLOCK_DRIFT_SECS {
+        tracing::warn!(did = %header.did, %path, reason = "timestamp_drift", ts = header.ts, "鉴权拒绝：时间戳漂移超限");
         return ApiError::unauthorized("VG-SIG 时间戳漂移超限（±300s）").into_response();
     }
 
     // DID 解析 → 文档查询（短事务：begin + find + commit）
     let did = match Did::parse(&header.did) {
         Ok(d) => d,
-        Err(_) => return ApiError::unauthorized("VG-SIG DID 非法").into_response(),
+        Err(_) => {
+            tracing::warn!(did = %header.did, %path, reason = "did_invalid", "鉴权拒绝：DID 语法非法");
+            return ApiError::unauthorized("VG-SIG DID 非法").into_response();
+        }
     };
     let doc = match find_document(&state, &did).await {
         Ok(Some(d)) => d,
         Ok(None) => {
-            return ApiError::unauthorized("VG-SIG 签名者 DID 文档不存在").into_response()
+            tracing::warn!(did = did.as_str(), %path, reason = "did_not_found", "鉴权拒绝：签名者 DID 文档不存在");
+            return ApiError::unauthorized("VG-SIG 签名者 DID 文档不存在").into_response();
         }
-        Err(e) => return ApiError::from(e).into_response(),
+        Err(e) => {
+            tracing::warn!(did = did.as_str(), %path, reason = "storage_error", error = %e, "鉴权拒绝：DID 文档查询存储错误");
+            return ApiError::from(e).into_response();
+        }
     };
     let Some(active) = doc.active_pubkey() else {
+        tracing::warn!(did = did.as_str(), %path, reason = "all_keys_revoked", "鉴权拒绝：签名者无活跃公钥");
         return ApiError::unauthorized("VG-SIG 签名者无活跃公钥（全部已撤销）").into_response();
     };
 
@@ -128,14 +146,19 @@ pub async fn vg_sig_auth(
     let msg = sign_message(&method, &path, header.ts, &header.nonce);
     let recovered_digest = match recover_digest(&header.sig65, msg.as_bytes()) {
         Ok(d) => d,
-        Err(_) => return ApiError::unauthorized("VG-SIG 签名恢复失败").into_response(),
+        Err(_) => {
+            tracing::warn!(did = did.as_str(), %path, reason = "signature_recover_failed", "鉴权拒绝：签名恢复失败");
+            return ApiError::unauthorized("VG-SIG 签名恢复失败").into_response();
+        }
     };
     if recovered_digest != *active.public_key.as_bytes() {
+        tracing::warn!(did = did.as_str(), %path, reason = "signature_mismatch", "鉴权拒绝：签名与活跃公钥不匹配");
         return ApiError::unauthorized("VG-SIG 签名与活跃公钥不匹配").into_response();
     }
 
     // 签名已验证通过：记录 nonce（重放即 401）
     if !state.nonce_store.check_and_record(&header.nonce, header.ts) {
+        tracing::warn!(did = did.as_str(), %path, reason = "nonce_replay", nonce = %header.nonce, "鉴权拒绝：nonce 已使用（重放）");
         return ApiError::unauthorized("VG-SIG nonce 已使用（重放）").into_response();
     }
 
@@ -152,6 +175,15 @@ pub async fn vg_sig_auth(
 /// - ts：纯数字（i64 秒）；
 /// - nonce：`[A-Za-z0-9-_]{1,64}`。
 fn parse_sig_header(raw: &str) -> Option<SigHeader> {
+    // 重复键拒绝：同一键出现两次视为注入尝试（值字符集均不含 '='/'"'，
+    // 键模式不会在合法值内误命中）
+    if raw.matches("did=\"").count() != 1
+        || raw.matches("sig=\"").count() != 1
+        || raw.matches("ts=").count() != 1
+        || raw.matches("nonce=\"").count() != 1
+    {
+        return None;
+    }
     let did = extract_quoted(raw, "did")?;
     let sig = extract_quoted(raw, "sig")?;
     let ts = extract_bare(raw, "ts")?;
@@ -243,9 +275,8 @@ fn recover_digest(sig65: &[u8; 65], msg: &[u8]) -> Result<[u8; 32], ()> {
     let rid = RecoveryId::new(sig65[64] == 1, false);
     let vk = k256::ecdsa::VerifyingKey::recover_from_prehash(&keccak256(msg), &sig, rid)
         .map_err(|_| ())?;
-    let encoded = vk.to_encoded_point(false);
-    let pubkey = k256::PublicKey::from_sec1_bytes(encoded.as_bytes()).map_err(|_| ())?;
-    let compressed = vg_infra_crypto::stealth::compress(&pubkey);
+    // 直接压缩编码（33B sec1），不做 65B 解压往返
+    let compressed = vk.to_encoded_point(true);
     Ok(keccak256(compressed.as_bytes()))
 }
 
@@ -254,8 +285,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use axum::routing::get;
-    use axum::{Extension, Json, Router};
+    use axum::Router;
     use chrono::Utc;
     use tower::ServiceExt;
     use vg_domain::identity::{DidDocument, KeyType, SubjectKind, VerificationMethod};
@@ -313,6 +343,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_header_rejects_duplicate_keys() {
+        let mk = |extra: &str| {
+            format!(
+                "did=\"did:vg:{}\", {extra}, sig=\"0x{}\", ts=1, nonce=\"n\"",
+                "c".repeat(64),
+                {
+                    let mut s = [0u8; 65];
+                    s[..64].copy_from_slice(&[0x33u8; 64]);
+                    s[64] = 27;
+                    hex::encode(s)
+                }
+            )
+        };
+        assert!(parse_sig_header(&mk("k=\"无关\"")).is_some(), "基线应合法");
+        // 同键出现两次 → 拒绝
+        assert!(parse_sig_header(&mk(&format!("did=\"did:vg:{}\"", "d".repeat(64)))).is_none());
+        assert!(parse_sig_header(&mk("nonce=\"m\"")).is_none());
+        assert!(parse_sig_header(&mk("ts=2")).is_none());
+        // sig 重复需要键模式出现两次：第二份完整 sig 字段
+        let dup_sig = {
+            let mut s = [0u8; 65];
+            s[..64].copy_from_slice(&[0x44u8; 64]);
+            s[64] = 27;
+            format!("sig=\"0x{}\"", hex::encode(s))
+        };
+        assert!(parse_sig_header(&mk(&dup_sig)).is_none());
+    }
+
+    #[test]
     fn nonce_store_dedup_and_capacity_eviction() {
         let s = NonceStore::new();
         assert!(s.check_and_record("a", 1));
@@ -358,27 +417,10 @@ mod tests {
         kp
     }
 
-    /// 测试 router：受保护 ping 路由回显 AuthedDid + health + consumer。
+    /// 测试 router：直接复用生产 [`crate::build_router`]（内含
+    /// `#[cfg(test)]` 测试保护路由 `__test_protected` 与 consumer 测试路由）。
     fn test_router(state: SharedState) -> Router {
-        let protected = Router::new().route(
-            "/api/v1/__test_protected",
-            get(|Extension(AuthedDid(did)): Extension<AuthedDid>| async move {
-                Json(serde_json::json!({ "did": did.as_str() }))
-            }),
-        );
-        let consumer = Router::new().route(
-            "/api/v1/consumer/x",
-            get(|| async { "ok" }).post(|| async { "ok" }),
-        );
-        Router::new()
-            .route("/health", get(|| async { "ok" }))
-            .merge(protected)
-            .merge(consumer)
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                vg_sig_auth,
-            ))
-            .with_state(state)
+        crate::build_router(state)
     }
 
     fn state(pool: sqlx::PgPool) -> SharedState {
@@ -591,6 +633,35 @@ mod tests {
         )
         .await;
         assert_eq!(s3, StatusCode::UNAUTHORIZED, "POST consumer 无签应 401");
+    }
+
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn whitelist_prefix_collision_paths_require_signature(pool: sqlx::PgPool) {
+        let router = test_router(state(pool));
+        // /api/v1/consumer-admin、/api/v1/consumerfoo 是独立段，不在白名单内：
+        // 无签 GET 一律 401（而非被 starts_with 误放行后的 404）
+        for path in ["/api/v1/consumer-admin", "/api/v1/consumerfoo"] {
+            let (status, _) = send(
+                &router,
+                Request::builder().uri(path).body(Body::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path} 无签应 401");
+        }
+    }
+
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn duplicated_vg_sig_header_line_is_401(pool: sqlx::PgPool) {
+        seed_identity(&pool, false).await;
+        let router = test_router(state(pool));
+        let ts = Utc::now().timestamp();
+        let kp = vg_infra_crypto::KeyPair::generate();
+        let mut req = signed_req(&kp, &Method::GET, "/api/v1/__test_protected", ts, "n1");
+        // 追加第二行同值 VG-SIG 头（HTTP 允许重复头）
+        let v = req.headers().get("VG-SIG").unwrap().clone();
+        req.headers_mut().append("VG-SIG", v);
+        let (status, body) = send(&router, req).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "重复 VG-SIG 头应 401：{body}");
     }
 
     #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
