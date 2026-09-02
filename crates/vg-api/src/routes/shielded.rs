@@ -106,7 +106,8 @@ pub async fn decrypt(
     let until: Option<DateTime<Utc>> = {
         let mut tx = super::begin_tx(&state.pool).await?;
         let row = sqlx::query(
-            "SELECT until FROM data_access_grants WHERE grantee = $1 AND dataset = $2",
+            "SELECT until FROM data_access_grants WHERE grantee = $1 AND dataset = $2 \
+             ORDER BY until DESC LIMIT 1",
         )
         .bind(regulator.as_str())
         .bind(DATASET_SHIELDED_EXTRA)
@@ -141,12 +142,14 @@ pub struct RootBody {
     items: Vec<String>,
 }
 
-/// 提交状态根（Merkle(items) → 库 → 账本锚定）。
+/// 提交状态根（Merkle(items) → 库 → 账本锚定；**仅 Regulator**，
+/// Phase1 粗粒度 kind 校验 → 403，辖区级留 Phase2）。
 pub async fn submit_root(
     State(state): State<SharedState>,
-    axum::Extension(AuthedDid(_)): axum::Extension<AuthedDid>,
+    axum::Extension(AuthedDid(submitter)): axum::Extension<AuthedDid>,
     crate::AppJson(body): crate::AppJson<RootBody>,
 ) -> Result<Json<Value>, ApiError> {
+    super::require_regulator(&state, &submitter).await?;
     let items: Vec<Hash32> = body
         .items
         .iter()
@@ -167,12 +170,14 @@ pub struct GrantBody {
     until: DateTime<Utc>,
 }
 
-/// 授予数据集访问权（IAM 管理；刷新语义见服务 doc）。
+/// 授予数据集访问权（IAM 管理；**仅 Regulator**，Phase1 粗粒度 kind
+/// 校验 → 403，辖区级留 Phase2；刷新语义见服务 doc）。
 pub async fn grant(
     State(state): State<SharedState>,
-    axum::Extension(AuthedDid(_admin)): axum::Extension<AuthedDid>,
+    axum::Extension(AuthedDid(admin)): axum::Extension<AuthedDid>,
     crate::AppJson(body): crate::AppJson<GrantBody>,
 ) -> Result<Json<Value>, ApiError> {
+    super::require_regulator(&state, &admin).await?;
     grant_data_access(state.engine.deps(), &body.grantee, &body.dataset, body.until).await?;
     Ok(Json(json!({
         "grantee": body.grantee,

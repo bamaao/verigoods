@@ -81,6 +81,55 @@ impl IdentityRepository for PgIdentityRepo {
         Ok(())
     }
 
+    /// **insert-only** 保存（注册路径专用，防并发替换竞态）。
+    ///
+    /// `dids` 行 `INSERT ... ON CONFLICT (id) DO NOTHING`：0 行受影响
+    /// （同 did 已存在）→ [`DomainError::AlreadyExists`]，**绝不覆盖**
+    /// 竞争先提交者的文档；成功后再插入验证方法（新文档，无 DELETE
+    /// 同步需求）。与 [`Self::save_document`]（upsert，密钥轮换用）对立。
+    async fn insert_document(
+        &self,
+        ctx: &mut Self::Context,
+        doc: &DidDocument,
+    ) -> Result<(), DomainError> {
+        let inserted = sqlx::query(
+            "INSERT INTO dids (id, kind, parent_did, jurisdiction, created_at) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(doc.did.as_str())
+        .bind(enum_to_text(&doc.kind))
+        .bind(doc.parent.as_ref().map(Did::as_str))
+        .bind(&doc.jurisdiction)
+        .bind(doc.created_at)
+        .execute(&mut **ctx)
+        .await
+        .map_err(storage)?;
+        if inserted.rows_affected() == 0 {
+            return Err(DomainError::AlreadyExists);
+        }
+
+        for m in &doc.methods {
+            sqlx::query(
+                "INSERT INTO verification_methods (did, method_id, key_type, public_key, revoked) \
+                 VALUES ($1, $2, $3, $4, $5) \
+                 ON CONFLICT (did, method_id) DO UPDATE SET \
+                     key_type = EXCLUDED.key_type, \
+                     public_key = EXCLUDED.public_key, \
+                     revoked = EXCLUDED.revoked",
+            )
+            .bind(doc.did.as_str())
+            .bind(&m.id)
+            .bind(enum_to_text(&m.key_type))
+            .bind(m.public_key.as_bytes().as_slice())
+            .bind(m.revoked)
+            .execute(&mut **ctx)
+            .await
+            .map_err(storage)?;
+        }
+        Ok(())
+    }
+
     /// 按 DID 查找文档；不存在返回 `Ok(None)`。
     ///
     /// 方法列表 `ORDER BY method_id` 稳定排序（审查既定）：
@@ -298,6 +347,44 @@ mod tests {
             .await
             .expect("查询应成功");
         assert!(missing.is_none());
+
+        tx.commit().await.unwrap();
+    }
+
+    /// insert_document 为 insert-only：首插成功；同 did 二插 →
+    /// AlreadyExists 且原文档不被覆盖（方法集保持首次内容）。
+    #[sqlx::test]
+    async fn insert_document_rejects_duplicate_without_overwrite(pool: sqlx::PgPool) {
+        let repo = PgIdentityRepo;
+        let mut tx = pool.begin().await.unwrap();
+
+        let original = enterprise_doc();
+        repo.insert_document(&mut tx, &original)
+            .await
+            .expect("首次 insert 应成功");
+
+        // 同 did、不同方法集：不得覆盖
+        let mut squatter = original.clone();
+        squatter.methods = vec![VerificationMethod::new(
+            "z-0",
+            KeyType::Secp256k1,
+            Hash32::keccak(b"squatter"),
+            squatter.did.clone(),
+        )];
+        let err = repo
+            .insert_document(&mut tx, &squatter)
+            .await
+            .expect_err("重复 insert 应返回 AlreadyExists");
+        assert!(matches!(err, DomainError::AlreadyExists), "实际：{err:?}");
+
+        let found = repo
+            .find_document(&mut tx, &original.did)
+            .await
+            .unwrap()
+            .expect("文档应存在");
+        let ids: Vec<&str> = found.methods.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["k-0", "k-1"], "原方法集不得被覆盖");
+        assert_eq!(found.kind, SubjectKind::Enterprise);
 
         tx.commit().await.unwrap();
     }

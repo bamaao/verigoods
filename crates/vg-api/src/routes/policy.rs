@@ -48,12 +48,14 @@ pub async fn list(
     Ok(Json(policies))
 }
 
-/// 策略注册（直写 + 最后锚定）。
+/// 策略注册（直写 + 最后锚定；**仅 Regulator**，Phase1 粗粒度 kind
+/// 校验 → 403，辖区级留 Phase2）。
 pub async fn create(
     State(state): State<SharedState>,
-    axum::Extension(AuthedDid(_regulator)): axum::Extension<AuthedDid>,
+    axum::Extension(AuthedDid(regulator)): axum::Extension<AuthedDid>,
     crate::AppJson(policy): crate::AppJson<Policy>,
 ) -> Result<(StatusCode, Json<Policy>), ApiError> {
+    super::require_regulator(&state, &regulator).await?;
     // 先库后锚（悬挂锚契约）
     let mut tx = begin_tx(&state.pool).await?;
     state

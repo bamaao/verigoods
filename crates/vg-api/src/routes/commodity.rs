@@ -24,7 +24,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
-use vg_domain::commodity::ports::CommodityRepository;
 use vg_domain::commodity::{Batch, LineageEdge, ProductType};
 use vg_domain::intent::IntentAction;
 use vg_domain::shared::{BatchId, DomainError, Hash32, ProductId, SubjectRef};
@@ -195,9 +194,13 @@ pub async fn create_product(
         body.category,
         Hash32::from_hex(&body.metadata_hash)?,
     )?;
-    let repo = vg_infra_pg::PgCommodityRepo;
     let mut tx = begin_tx(&state.pool).await?;
-    repo.save_product(&mut tx, &product).await?;
+    state
+        .engine
+        .deps()
+        .commodity
+        .save_product(&mut tx, &product)
+        .await?;
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;
@@ -209,9 +212,13 @@ pub async fn get_product(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<ProductType>, ApiError> {
-    let repo = vg_infra_pg::PgCommodityRepo;
     let mut tx = begin_tx(&state.pool).await?;
-    let product = repo.find_product(&mut tx, &ProductId::new(id)).await?;
+    let product = state
+        .engine
+        .deps()
+        .commodity
+        .find_product(&mut tx, &ProductId::new(id))
+        .await?;
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;

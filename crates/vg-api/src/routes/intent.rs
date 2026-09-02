@@ -13,7 +13,6 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::Json;
 use serde_json::Value;
-use vg_domain::intent::ports::IntentRepository;
 use vg_domain::intent::{Intent, IntentAction};
 use vg_domain::shared::{DomainError, IntentId};
 
@@ -42,9 +41,13 @@ pub async fn get(
     State(state): State<SharedState>,
     Path(id): Path<String>,
 ) -> Result<Json<Intent>, ApiError> {
-    let repo = vg_infra_pg::PgIntentRepository;
     let mut tx = begin_tx(&state.pool).await?;
-    let intent = repo.get(&mut tx, &IntentId::new(id.clone())).await?;
+    let intent = state
+        .engine
+        .deps()
+        .intents
+        .get(&mut tx, &IntentId::new(id.clone()))
+        .await?;
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;

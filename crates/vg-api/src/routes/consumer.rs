@@ -9,7 +9,7 @@
 //! （含所有者本人）经本端点都只能看到掩码；完整 owner 走签名的
 //! `GET /api/v1/batches/{id}`。批次不存在 → 404。
 //!
-//! Phase1 口径：仅批次（asset 无 produced_at 年龄语义，暂 404）。
+//! Phase1 口径：仅批次（asset 无 produced_at 年龄语义，暂 400）。
 
 use axum::extract::{Path, State};
 use axum::Json;

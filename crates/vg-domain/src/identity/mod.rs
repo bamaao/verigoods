@@ -33,6 +33,20 @@ pub mod ports {
             doc: &DidDocument,
         ) -> Result<(), DomainError>;
 
+        /// **insert-only** 保存 DID 文档（注册路径专用）。
+        ///
+        /// 与 [`IdentityRepository::save_document`]（upsert，密钥轮换用）
+        /// 不同：同 did 已存在时**不得覆盖**，返回
+        /// [`DomainError::AlreadyExists`]。实现必须以原子
+        /// "insert-if-absent" 语义保证并发注册同一 did 时恰有一方成功
+        /// （如 SQL `INSERT ... ON CONFLICT DO NOTHING` + 0 行判定），
+        /// 消除 find-then-upsert 的检查-使用竞态窗口。
+        async fn insert_document(
+            &self,
+            ctx: &mut Self::Context,
+            doc: &DidDocument,
+        ) -> Result<(), DomainError>;
+
         /// 按 DID 查找 DID 文档；不存在时返回 `Ok(None)`。
         async fn find_document(
             &self,
@@ -88,6 +102,18 @@ mod tests {
             ctx: &mut Self::Context,
             doc: &DidDocument,
         ) -> Result<(), DomainError> {
+            ctx.docs.insert(doc.did.clone(), doc.clone());
+            Ok(())
+        }
+
+        async fn insert_document(
+            &self,
+            ctx: &mut Self::Context,
+            doc: &DidDocument,
+        ) -> Result<(), DomainError> {
+            if ctx.docs.contains_key(&doc.did) {
+                return Err(DomainError::AlreadyExists);
+            }
             ctx.docs.insert(doc.did.clone(), doc.clone());
             Ok(())
         }

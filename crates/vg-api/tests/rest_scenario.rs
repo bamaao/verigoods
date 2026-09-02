@@ -885,3 +885,261 @@ async fn merge_path_batch_id_must_be_in_children(pool: sqlx::PgPool) {
     assert_eq!(s, StatusCode::OK, "合法合并应 200：{v}");
     assert_eq!(v["status"], "confirmed", "合并应直达 Confirmed：{v}");
 }
+
+// ---------- 安全回归：DID 注册并发竞态（C1） ----------
+
+/// 构造合法自派生 DID 文档 JSON：k-0 = did 派生钥（排序首位），
+/// 可选附加方法（不同竞争者各异，用于判定最终文档归属）。
+fn register_doc(did: &str, base_digest: &str, extra: Option<(&str, &str)>) -> Value {
+    let mut methods = vec![json!({
+        "id": "k-0", "key_type": "secp256k1",
+        "public_key": base_digest, "controller": did, "revoked": false
+    })];
+    if let Some((id, digest)) = extra {
+        methods.push(json!({
+            "id": id, "key_type": "secp256k1",
+            "public_key": digest, "controller": did, "revoked": false
+        }));
+    }
+    json!({
+        "did": did,
+        "kind": "enterprise",
+        "methods": methods,
+        "parent": null, "jurisdiction": null,
+        "created_at": Utc::now().to_rfc3339(),
+    })
+}
+
+/// 并发注册同一 did：insert-first（ON CONFLICT DO NOTHING）保证
+/// 恰好一方 201、另一方 409，且最终文档方法集 == 201 方提交的内容
+/// （后提交者不得静默替换先提交者）。
+#[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+async fn concurrent_did_register_exactly_one_wins(pool: sqlx::PgPool) {
+    let state = test_state(pool.clone());
+    let router = vg_api::build_router(state);
+
+    // 双方共享同一 did（派生自 base 钥）；各自的附加方法不同
+    let base = KeyPair::generate();
+    let did = did_of(&base);
+    let extra_a = KeyPair::generate();
+    let extra_b = KeyPair::generate();
+    let doc_a = register_doc(
+        &did,
+        &base.pubkey_digest().as_hex(),
+        Some(("k-1", &extra_a.pubkey_digest().as_hex())),
+    );
+    let doc_b = register_doc(
+        &did,
+        &base.pubkey_digest().as_hex(),
+        Some(("k-2", &extra_b.pubkey_digest().as_hex())),
+    );
+
+    let post = |doc: Value| {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/dids")
+            .header("content-type", "application/json")
+            .body(Body::from(doc.to_string()))
+            .unwrap()
+    };
+    // 免签白名单端点：并发双发（两个 oneshot 同时 poll）
+    let ((s1, v1), (s2, v2)) = tokio::join!(
+        send(&router, post(doc_a)),
+        send(&router, post(doc_b)),
+    );
+    let mut statuses = vec![s1, s2];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        vec![StatusCode::CREATED, StatusCode::CONFLICT], // 升序：201 < 409
+        "并发注册必须恰一个 201 一个 409：{v1} / {v2}"
+    );
+
+    // 最终文档 == 201 方内容：附加方法（k-1/k-2）只属于胜者
+    let winner_extra = if s1 == StatusCode::CREATED {
+        &extra_a
+    } else {
+        &extra_b
+    };
+    let winner_extra_id = if s1 == StatusCode::CREATED { "k-1" } else { "k-2" };
+    let repo = PgIdentityRepo;
+    let mut tx = pool.begin().await.unwrap();
+    let found = repo
+        .find_document(&mut tx, &vg_domain::shared::Did::parse(&did).unwrap())
+        .await
+        .unwrap()
+        .expect("并发注册后文档应存在");
+    tx.commit().await.unwrap();
+    let extras: Vec<&vg_domain::identity::VerificationMethod> = found
+        .methods
+        .iter()
+        .filter(|m| m.id != "k-0")
+        .collect();
+    assert_eq!(
+        extras.len(),
+        1,
+        "附加方法只应有胜者的一条：{:?}",
+        found.methods
+    );
+    assert_eq!(extras[0].id, winner_extra_id);
+    assert_eq!(
+        extras[0].public_key,
+        winner_extra.pubkey_digest(),
+        "最终文档必须是 201 方的（未被后提交者覆盖）"
+    );
+}
+
+// ---------- 安全回归：revoked 诱饵抢注（C2） ----------
+
+/// 攻击构造：{排序首位的 revoked 受害者摘要方法, 自身活跃方法} 抢注
+/// 受害者 did。绑定口径 = active_pubkey 口径（首个未撤销排序方法）
+/// → did 与自身活跃钥摘要不符 → 400。
+#[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+async fn revoked_decoy_did_squatting_is_400(pool: sqlx::PgPool) {
+    let state = test_state(pool);
+    let router = vg_api::build_router(state);
+
+    let victim = KeyPair::generate();
+    let victim_did = did_of(&victim);
+    let attacker = KeyPair::generate();
+    let decoy = json!({
+        "did": victim_did,
+        "kind": "enterprise",
+        "methods": [
+            { "id": "a-decoy", "key_type": "secp256k1",
+              "public_key": victim.pubkey_digest().as_hex(),
+              "controller": victim_did, "revoked": true },
+            { "id": "b-own", "key_type": "secp256k1",
+              "public_key": attacker.pubkey_digest().as_hex(),
+              "controller": victim_did, "revoked": false }
+        ],
+        "parent": null, "jurisdiction": null,
+        "created_at": Utc::now().to_rfc3339(),
+    });
+    let (s, v) = send(
+        &router,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/dids")
+            .header("content-type", "application/json")
+            .body(Body::from(decoy.to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "revoked 诱饵抢注应 400：{v}");
+
+    // 合法注册（首个未撤销方法派生）仍然 201 —— 过滤 revoked 不误伤
+    let honest = register_doc(
+        &did_of(&attacker),
+        &attacker.pubkey_digest().as_hex(),
+        None,
+    );
+    let (s, v) = send(
+        &router,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/dids")
+            .header("content-type", "application/json")
+            .body(Body::from(honest.to_string()))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "合法自派生注册应 201：{v}");
+}
+
+// ---------- 安全回归：Agent 结构约束在 REST 入口生效 ----------
+
+/// 无 parent 的 Agent 注册/更新 → 400（validate 折叠 Unauthorized→InvalidInput）。
+#[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+async fn agent_without_parent_is_400_on_register_and_update(pool: sqlx::PgPool) {
+    let state = test_state(pool.clone());
+    let router = vg_api::build_router(state);
+    let kp = KeyPair::generate();
+    let did = did_of(&kp);
+    let doc = json!({
+        "did": did,
+        "kind": "agent",
+        "methods": [{ "id": "k-0", "key_type": "secp256k1",
+                      "public_key": kp.pubkey_digest().as_hex(),
+                      "controller": did, "revoked": false }],
+        "parent": null, "jurisdiction": null,
+        "created_at": Utc::now().to_rfc3339(),
+    });
+    let anon = Signer::new(KeyPair::generate()); // 免签端点，签名头不校验
+    let (s, v) = send(
+        &router,
+        anon.request("POST", "/api/v1/dids", Some(doc)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "无 parent 的 Agent 注册应 400：{v}");
+    assert_eq!(v["code"], "invalid_input");
+
+    // PUT 同样生效：已存在主体签名 PUT 一个缺 parent 的 Agent 文档 → 400
+    let ent = seed_identity(&pool, SubjectKind::Enterprise, None, &[]).await;
+    let ent_did = did_of(&ent);
+    let agent_kp = KeyPair::generate();
+    let bad_put = json!({
+        "did": ent_did,
+        "kind": "agent",
+        "methods": [{ "id": "k-0", "key_type": "secp256k1",
+                      "public_key": agent_kp.pubkey_digest().as_hex(),
+                      "controller": ent_did, "revoked": false }],
+        "parent": null, "jurisdiction": null,
+        "created_at": Utc::now().to_rfc3339(),
+    });
+    let e = Signer::new(ent);
+    let (s, v) = send(&router, e.request("PUT", "/api/v1/dids", Some(bad_put))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "PUT 无 parent 的 Agent 应 400：{v}");
+}
+
+// ---------- 安全回归：管理端点 Regulator 粗粒度校验 ----------
+
+/// 普通企业 DID 调用三个管理端点 → 403（policy_violated）。
+#[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+async fn admin_endpoints_reject_non_regulator(pool: sqlx::PgPool) {
+    let state = test_state(pool.clone());
+    let router = vg_api::build_router(state);
+    let ent = seed_identity(&pool, SubjectKind::Enterprise, Some("cn".into()), &[]).await;
+    let did_e = did_of(&ent);
+    let e = Signer::new(ent);
+
+    // POST /api/v1/policies
+    let policy = json!({
+        "policy_id": "pol-x", "version": 1, "authority": did_e,
+        "jurisdiction": "cn", "product_type": "milk",
+        "required_credentials": [], "required_proofs": [],
+        "transitions": [["created", "produced"]],
+        "effective_at": Utc::now().to_rfc3339(),
+        "expires_at": null, "active": true
+    });
+    let (s, v) = send(&router, e.request("POST", "/api/v1/policies", Some(policy))).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "企业调策略注册应 403：{v}");
+    assert_eq!(v["code"], "policy_violated");
+
+    // POST /api/v1/validium/grants
+    let until = (Utc::now() + Duration::hours(1)).to_rfc3339();
+    let (s, v) = send(
+        &router,
+        e.request(
+            "POST",
+            "/api/v1/validium/grants",
+            Some(json!({"grantee": did_e, "dataset": "shielded:extra", "until": until})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "企业调 IAM 授权应 403：{v}");
+    assert_eq!(v["code"], "policy_violated");
+
+    // POST /api/v1/validium/roots
+    let (s, v) = send(
+        &router,
+        e.request(
+            "POST",
+            "/api/v1/validium/roots",
+            Some(json!({"batch_ref": "vb-x", "items": ["11".repeat(32)]})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "企业调状态根提交应 403：{v}");
+    assert_eq!(v["code"], "policy_violated");
+}

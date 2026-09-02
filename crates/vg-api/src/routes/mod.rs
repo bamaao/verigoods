@@ -77,7 +77,7 @@ pub(crate) fn fresh_nonce() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+        .unwrap_or_else(|_| 1)
 }
 
 /// 组装 RawIntent 并执行引擎管道，返回 200 IntentResult。
@@ -113,4 +113,37 @@ pub(crate) async fn begin_tx(
     pool.begin()
         .await
         .map_err(|e| DomainError::Storage(format!("事务开启失败：{e}")))
+}
+
+/// 管理端点权限守卫（Phase1 粗粒度）：actor 主体类型必须为 Regulator。
+///
+/// 适用 `POST /api/v1/policies`、`POST /api/v1/validium/grants`、
+/// `POST /api/v1/validium/roots`。非 Regulator（含文档缺失，理论上
+/// 过不了 VG-SIG 鉴权）一律 [`DomainError::PolicyViolated`] → 403；
+/// 辖区级（jurisdiction 精确匹配）留待 Phase2 接 IAM。
+pub(crate) async fn require_regulator(
+    state: &crate::state::SharedState,
+    actor: &Did,
+) -> Result<(), ApiError> {
+    use vg_domain::identity::SubjectKind;
+
+    let mut tx = begin_tx(&state.pool).await?;
+    let doc = state
+        .engine
+        .deps()
+        .identity
+        .find_document(&mut tx, actor)
+        .await?;
+    tx.commit()
+        .await
+        .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;
+    let kind = doc
+        .map(|d| d.kind)
+        .ok_or_else(|| DomainError::PolicyViolated("签名者 DID 文档不存在".into()))?;
+    if kind != SubjectKind::Regulator {
+        return Err(ApiError::from(DomainError::PolicyViolated(format!(
+            "管理端点仅监管方（Regulator）可调用，实际主体类型：{kind:?}"
+        ))));
+    }
+    Ok(())
 }
