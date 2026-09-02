@@ -87,17 +87,23 @@ pub async fn scan_notes(
         };
         let commitment: Vec<u8> = row.get("commitment");
         let owner_ot: Vec<u8> = row.get("owner_ot_addr");
+        let (commitment, owner_ot) = match (
+            <[u8; 32]>::try_from(commitment),
+            <[u8; 32]>::try_from(owner_ot),
+        ) {
+            (Ok(c), Ok(o)) => (c, o),
+            _ => {
+                return Err(DomainError::Storage(
+                    "库中 notes 扫描列（commitment/owner_ot_addr）长度非法".into(),
+                )
+                .into())
+            }
+        };
         hits.push(ScannedNote {
             asset_ref: row.get("asset_ref"),
             amount: row.get("amount"),
-            owner_ot_addr: Hash32::from_bytes(
-                owner_ot.try_into().expect("CHECK 约束保证 32 字节"),
-            )
-            .as_hex(),
-            commitment: Hash32::from_bytes(
-                commitment.try_into().expect("CHECK 约束保证 32 字节"),
-            )
-            .as_hex(),
+            owner_ot_addr: Hash32::from_bytes(owner_ot).as_hex(),
+            commitment: Hash32::from_bytes(commitment).as_hex(),
             t: hex::encode(info.t),
         });
     }
@@ -108,6 +114,11 @@ pub async fn scan_notes(
 ///
 /// 与存储/身份无关的纯函数服务（`deps` 不参与），保持与其他服务同款
 /// Result 口径。
+///
+/// **IAM 空转声明**：本函数只做密码学解密，**不做授权判定**——授权
+/// 强制点在 Task 23 API 中间层（view 私钥持有证明 + `data_access_grants`
+/// 校验的双因子，见 [`crate::services::validium::grant_data_access`]）。
+/// 直接调用本函数者须自证已获授权。
 pub fn regulator_decrypt(
     extra: &[u8],
     view_priv_hex: &str,

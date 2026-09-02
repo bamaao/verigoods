@@ -42,12 +42,18 @@ pub fn merkle_root(items: &[Hash32]) -> Hash32 {
 /// 账本锚定。幂等口径：同 `batch_ref` 二次提交不重复落库，返回**既有**
 /// 根（不同条目集不会改写首批结果）；账本侧每次提交各记一条 state_root
 /// 锚（Task 18 语义）。
+///
+/// `items` 为空时直接返回零根且**不锚定**——空集无信息量，锚定零根
+/// 只会污染链上锚点流。
 pub async fn submit_validium_root(
     deps: &AppDeps,
     batch_ref: &str,
     items: &[Hash32],
 ) -> Result<Hash32, AppError> {
     let root = merkle_root(items);
+    if items.is_empty() {
+        return Ok(root); // 零根，不落库不锚定
+    }
 
     let mut tx = deps
         .pool
@@ -92,7 +98,12 @@ pub async fn submit_validium_root(
 
 /// 授予监管方数据集访问权（IAM，不走 intent 管道——无对应
 /// IntentAction，Phase2 扩展）。刷新语义：同 (grantee, dataset) 重复
-/// 授予覆盖 `until`（延展不缩短由调用方保证）。
+/// 授予只**延展** `until`（`WHERE EXCLUDED.until > 既有 until`，数据库
+/// 层强制不缩短，不依赖调用方自律）。
+///
+/// 授权消费侧（监管解密的强制校验点）在 Task 23 API 中间层：
+/// view 私钥持有 + 本表校验的双因子，见
+/// [`crate::services::shielded::regulator_decrypt`] 的 IAM 空转声明。
 pub async fn grant_data_access(
     deps: &AppDeps,
     regulator: &Did,
@@ -101,7 +112,8 @@ pub async fn grant_data_access(
 ) -> Result<(), AppError> {
     sqlx::query(
         "INSERT INTO data_access_grants (grantee, dataset, until) VALUES ($1, $2, $3) \
-         ON CONFLICT (grantee, dataset) DO UPDATE SET until = EXCLUDED.until",
+         ON CONFLICT (grantee, dataset) DO UPDATE SET until = EXCLUDED.until \
+         WHERE EXCLUDED.until > data_access_grants.until",
     )
     .bind(regulator.as_str())
     .bind(dataset)

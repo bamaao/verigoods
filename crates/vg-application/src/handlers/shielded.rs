@@ -1,9 +1,12 @@
 //! ShieldedTransfer 处理器（L3 审批门 + 双隐私模式之 Shielded Transactions）。
 //!
 //! 流程（顺序严格，doc 锁定）：
-//! 1. 构造被花费旧 Note → `nullifier("vg:shield:v1")`；
+//! 1. 构造被花费旧 Note → `nullifier("vg:shield:v1")`，并计算
+//!    `old_commitment` 做**存在性与一致性校验**（notes 表按承诺反查
+//!    amount/asset_ref——不存在即凭空铸造，直接 PolicyViolated 拒绝）；
 //! 2. **双花检查**：`ledger.is_nullifier_spent` 在锚定前查（并发双花窗口
-//!    由 nullifiers 表 PK + ledger 幂等锚定兜底——后到者插入即冲突回滚）；
+//!    由 nullifiers 表 PK + ledger 幂等锚定兜底——后到者插入即 23505，
+//!    [`map_write_err`] 优雅分类为双花拒绝而非裸存储错误）；
 //! 3. L3 审批门：approvals 未决 → [`HandlerOutcome::AwaitingApproval`]
 //!    （engine 落未决行；**门内不产生任何业务写入**——engine 对
 //!    AwaitingApproval 路径直接 commit，若门后有写入会被提前固化）；
@@ -13,7 +16,11 @@
 //! 6. ECIES ExtraData（监管 ViewKey 加密 {from,to,asset,ts}，from/to 仅
 //!    进密文，明文表/锚定载荷均无交易对手信息）；
 //! 7. note_opening 真实 ZK 证明 + verify + proofs 落档
-//!    （proof_id = `pf:<intent_id>`）；
+//!    （proof_id = `pf:<intent_id>`）。**电路只证明"知道新 Note 承诺的
+//!    前像"（构造性证明，Phase1 范围）**——设计 §5 第 4 步的"ExtraData
+//!    身份 == 签名者"电路约束属 Phase2 spend 电路（nullifier 派生 +
+//!    membership + from 绑定）；当前 from 绑定由 handler 应用层校验
+//!    承担（见 `from_did` 检查），非电路强制；
 //! 8. 三表同事务写入（notes / nullifiers / shielded_txs）；
 //! 9. **不发领域事件**：outbox 事件含 subject 明文会泄漏隐私语义，
 //!    Phase2 若需要再加脱敏变体（doc 注明取舍）；
@@ -23,7 +30,6 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rand::RngCore;
 use serde::Deserialize;
 use vg_domain::intent::{Intent, IntentAction, IntentStatus};
 use vg_domain::ports::{CircuitSpec, FieldElement, LedgerItem};
@@ -136,6 +142,15 @@ impl IntentHandler for ShieldedTransferHandler {
     ) -> Result<HandlerOutcome, DomainError> {
         let payload: ShieldedPayload = parse_payload(intent)?;
 
+        // from 绑定（应用层校验，非电路强制——见模块 doc 第 7 步）：
+        // from_did 必须等于 effective principal（代理时为被代理主体）。
+        let effective = intent.on_behalf_of.as_ref().unwrap_or(&intent.actor);
+        if payload.from_did != *effective {
+            return Err(DomainError::InvalidInput(
+                "from_did 必须为操作主体".into(),
+            ));
+        }
+
         // Phase1：全额转移（无找零）——金额必须与旧 Note 一致。
         if payload.amount != payload.old_note.amount {
             return Err(DomainError::InvalidInput(format!(
@@ -154,6 +169,39 @@ impl IntentHandler for ShieldedTransferHandler {
             old_salt,
         )?;
         let old_nullifier = old_note.nullifier(NULLIFIER_CTX);
+
+        // 旧 Note 存在性与一致性校验（凭空铸造防线）：按承诺反查 notes，
+        // 不存在即拒；存在则 amount / asset_ref 必须与自报口径一致
+        // （不一致 = 对手方伪造他 Note 的口径嫁接，同样拒绝）。
+        let old_commitment = old_note.commitment(deps.hasher.as_ref());
+        let existing: Option<(i64, String)> =
+            sqlx::query_as("SELECT amount, asset_ref FROM notes WHERE commitment = $1")
+                .bind(old_commitment.as_bytes().as_slice())
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(storage_err)?;
+        match existing {
+            None => {
+                return Err(DomainError::PolicyViolated(
+                    "旧 Note 承诺不存在（凭空铸造拒绝）".into(),
+                ));
+            }
+            Some((row_amount, row_asset)) => {
+                if row_amount != old_note.amount() as i64 {
+                    return Err(DomainError::PolicyViolated(format!(
+                        "旧 Note 金额不一致：自报 {}，链上 {}",
+                        old_note.amount(),
+                        row_amount
+                    )));
+                }
+                let expect_asset = subject_label(&payload.subject);
+                if row_asset != expect_asset {
+                    return Err(DomainError::PolicyViolated(format!(
+                        "旧 Note 资产不一致：自报 {expect_asset}，链上 {row_asset}"
+                    )));
+                }
+            }
+        }
 
         // 双花检查（锚定前查；并发窗口由 nullifiers PK + 锚定幂等兜底）。
         if deps.ledger.is_nullifier_spent(&old_nullifier).await? {
@@ -192,11 +240,10 @@ impl IntentHandler for ShieldedTransferHandler {
         let (ot, _shared) = crypto::derive_one_time(&meta_view)
             .map_err(|e| DomainError::InvalidInput(format!("一次性地址派生失败：{e}")))?;
 
-        // 新 Note：secret/salt 由发送方生成，接收方经扫描 + 私库获取。
-        let mut new_secret = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut new_secret);
-        let mut new_salt = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut new_salt);
+        // 新 Note：secret/salt 由发送方生成，接收方经扫描 + 私库获取
+        // （随机性经 crypto 基础设施收敛，应用层不直接接触 RNG）。
+        let new_secret = crypto::generate_note_secret();
+        let new_salt = crypto::generate_note_salt();
         let new_note = Note::new(
             payload.subject.clone(),
             ot.addr_digest(),
@@ -250,6 +297,7 @@ impl IntentHandler for ShieldedTransferHandler {
             .await?;
 
         // ---- 三表写入（同事务；engine savepoint 保护）----
+        // 23505 优雅分类（并发双花/重复提交窗口兜底，见 map_write_err doc）。
         sqlx::query(
             "INSERT INTO notes \
                  (commitment, asset_ref, owner_ot_addr, amount, created_tx, \
@@ -267,7 +315,7 @@ impl IntentHandler for ShieldedTransferHandler {
         .bind(new_note.salt().as_slice())
         .execute(&mut **tx)
         .await
-        .map_err(storage_err)?;
+        .map_err(|e| map_write_err(e, WriteTable::Notes))?;
 
         sqlx::query(
             "INSERT INTO nullifiers (nf, spent_at, intent_id) VALUES ($1, $2, $3)",
@@ -277,7 +325,7 @@ impl IntentHandler for ShieldedTransferHandler {
         .bind(intent.id.as_ref())
         .execute(&mut **tx)
         .await
-        .map_err(storage_err)?;
+        .map_err(|e| map_write_err(e, WriteTable::Nullifiers))?;
 
         sqlx::query(
             "INSERT INTO shielded_txs (nf, commitment, extra, at) VALUES ($1, $2, $3, $4)",
@@ -288,7 +336,7 @@ impl IntentHandler for ShieldedTransferHandler {
         .bind(now)
         .execute(&mut **tx)
         .await
-        .map_err(storage_err)?;
+        .map_err(|e| map_write_err(e, WriteTable::ShieldedTxs))?;
 
         // 不发领域事件（隐私语义，见模块 doc）。
 
@@ -331,6 +379,35 @@ fn commitment_limbs(commitment: &Hash32) -> Vec<FieldElement> {
 /// sqlx 错误 → 领域存储错误（handler 直写隐私表的唯一 SQL 面）。
 fn storage_err(e: sqlx::Error) -> DomainError {
     DomainError::Storage(format!("隐私表写入失败：{e}"))
+}
+
+/// 三表写入目标（23505 分类用）。
+#[derive(Clone, Copy)]
+enum WriteTable {
+    Notes,
+    Nullifiers,
+    ShieldedTxs,
+}
+
+/// 三表写入错误映射：对 PG 23505（唯一约束冲突）做优雅分类——
+///
+/// - `nullifiers`：PK 冲突 = 该 nullifier 已花费，即**并发双花**
+///   （预检查窗口外两个事务同时通过 is_nullifier_spent，后提交者在此
+///   兜底撞 PK）→ `PolicyViolated("nullifier 已花费（双花）")`；
+/// - `notes` / `shielded_txs`：承诺/行重复 = **重复提交** → `AlreadyExists`；
+/// - 其余照旧归 `Storage`。
+fn map_write_err(e: sqlx::Error, table: WriteTable) -> DomainError {
+    if e.as_database_error()
+        .is_some_and(|d| d.is_unique_violation())
+    {
+        return match table {
+            WriteTable::Nullifiers => {
+                DomainError::PolicyViolated("nullifier 已花费（双花）".into())
+            }
+            WriteTable::Notes | WriteTable::ShieldedTxs => DomainError::AlreadyExists,
+        };
+    }
+    storage_err(e)
 }
 
 #[cfg(test)]
@@ -485,11 +562,9 @@ mod tests {
 
     /// 旧 Note 直接裸 SQL seed（含 0007 全部新列；发送方自持有）。
     async fn seed_old_note(pool: &sqlx::PgPool, subject: &SubjectRef, amount: u64) -> OldNoteSpec {
-        let mut secret = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut secret);
+        let mut secret = crypto::generate_note_secret();
         secret[0] |= 0x80; // 保证非全零（OsRng 全零概率不可达，防御式）
-        let mut salt = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
+        let salt = crypto::generate_note_salt();
         let owner = Hash32::keccak(b"old-owner-ot");
         let note = Note::new(subject.clone(), owner, amount, secret, salt).unwrap();
         let commitment = note.commitment(&PoseidonNoteHasher);
@@ -758,6 +833,136 @@ mod tests {
         assert_eq!(after.0, before.0, "双花拒绝不得产生新 Note");
     }
 
+    /// 凭空铸造（plan 必测）：捏造从未入库的 old_note（随机 secret）→
+    /// Rejected 含"不存在/铸造"，notes/nullifiers/shielded_txs 零变化。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn minting_nonexistent_note_rejected(pool: sqlx::PgPool) {
+        let p = seed_parties(&pool).await;
+        let subject = SubjectRef::Batch(vg_domain::shared::BatchId::new("bt-mint"));
+        // 不 seed_old_note：完全捏造一份旧 Note 规格
+        let fake = OldNoteSpec {
+            secret: hex::encode(crypto::generate_note_secret()),
+            salt: hex::encode(crypto::generate_note_salt()),
+            owner_ot_addr: Hash32::keccak(b"phantom-owner"),
+            amount: 999,
+        };
+        let eng = engine(pool.clone());
+        let r = eng
+            .execute(raw("mn-1", &p.sender_did, shielded_payload(&p, &subject, &fake), 1))
+            .await
+            .unwrap();
+        assert_eq!(r.status, IntentStatus::Rejected);
+        let msg = r.rejection.expect("应有拒绝原因");
+        assert!(
+            msg.contains("不存在") || msg.contains("铸造"),
+            "实际：{msg}"
+        );
+        for table in ["notes", "nullifiers", "shielded_txs"] {
+            let c: (i64,) = sqlx::query_as(&format!("SELECT count(*) FROM {table}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(c.0, 0, "{table} 不得有任何行");
+        }
+    }
+
+    /// from_did 绑定：填他人 DID → Rejected（应用层校验，见模块 doc 第 7 步）。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn from_did_mismatch_rejected(pool: sqlx::PgPool) {
+        let p = seed_parties(&pool).await;
+        let subject = SubjectRef::Batch(vg_domain::shared::BatchId::new("bt-frombind"));
+        let old = seed_old_note(&pool, &subject, 6).await;
+        let eng = engine(pool.clone());
+        let mut payload = shielded_payload(&p, &subject, &old);
+        payload["from_did"] = serde_json::json!(p.recipient_did.as_str());
+        let r = eng
+            .execute(raw("fb-1", &p.sender_did, payload, 1))
+            .await
+            .unwrap();
+        assert_eq!(r.status, IntentStatus::Rejected);
+        assert!(
+            r.rejection
+                .as_deref()
+                .is_some_and(|x| x.contains("from_did")),
+            "实际：{:?}",
+            r.rejection
+        );
+    }
+
+    /// map_write_err 单测（真实 23505，PgDatabaseError 不可内存构造）：
+    /// 各表唯一冲突按表分类，非唯一冲突归 Storage。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn write_err_mapping_classifies_23505(pool: sqlx::PgPool) {
+        let nf = Hash32::keccak(b"nf-dup");
+        let cm = Hash32::keccak(b"cm-dup");
+        let now = Utc::now();
+
+        let insert_nf = |nf: Hash32| {
+            sqlx::query("INSERT INTO nullifiers (nf, spent_at, intent_id) VALUES ($1, $2, $3)")
+                .bind(nf.as_bytes().to_vec())
+                .bind(now)
+                .bind("t")
+                .execute(&pool)
+        };
+        insert_nf(nf).await.unwrap();
+        let err = insert_nf(nf).await.unwrap_err();
+        match map_write_err(err, WriteTable::Nullifiers) {
+            DomainError::PolicyViolated(m) => assert!(m.contains("双花")),
+            other => panic!("nullifiers 23505 应为 PolicyViolated，实际 {other:?}"),
+        }
+
+        let insert_note = |cm: Hash32| {
+            sqlx::query(
+                "INSERT INTO notes (commitment, asset_ref, owner_ot_addr, amount, \
+                     addr_point, ephemeral, secret, salt) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(cm.as_bytes().to_vec())
+            .bind("batch:bt-x")
+            .bind(Hash32::keccak(b"o").as_bytes().to_vec())
+            .bind(1_i64)
+            .bind([0x02u8; 33].as_slice())
+            .bind([0x02u8; 33].as_slice())
+            .bind([0u8; 32].as_slice())
+            .bind([0u8; 16].as_slice())
+            .execute(&pool)
+        };
+        insert_note(cm).await.unwrap();
+        let err = insert_note(cm).await.unwrap_err();
+        assert!(matches!(
+            map_write_err(err, WriteTable::Notes),
+            DomainError::AlreadyExists
+        ));
+
+        let insert_tx = |nf: Hash32, cm: Hash32| {
+            sqlx::query(
+                "INSERT INTO shielded_txs (nf, commitment, extra, at) VALUES ($1, $2, $3, $4)",
+            )
+            .bind(nf.as_bytes().to_vec())
+            .bind(cm.as_bytes().to_vec())
+            .bind([1u8; 4].as_slice())
+            .bind(now)
+            .execute(&pool)
+        };
+        // commitment 冲突（唯一索引）→ AlreadyExists
+        insert_tx(Hash32::keccak(b"nf-tx"), cm).await.unwrap();
+        let err = insert_tx(Hash32::keccak(b"nf-tx-2"), cm).await.unwrap_err();
+        assert!(matches!(
+            map_write_err(err, WriteTable::ShieldedTxs),
+            DomainError::AlreadyExists
+        ));
+
+        // 非唯一冲突（23514？——用 not null 违规 23502 归位 Storage）
+        let err = sqlx::query("INSERT INTO nullifiers (nf) VALUES (NULL)")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            map_write_err(err, WriteTable::Nullifiers),
+            DomainError::Storage(_)
+        ));
+    }
+
     /// 坏 recipient_meta（前缀合法但不在曲线上）→ Rejected。
     #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
     async fn bad_recipient_meta_rejected(pool: sqlx::PgPool) {
@@ -896,6 +1101,30 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r3, expect);
+
+        // 空条目：返回零根且不落库、不锚定（无信息锚定污染链）
+        let baseline: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM ledger_anchors WHERE kind = 'state_root'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let empty = services::validium::submit_validium_root(&d, "br-empty", &[])
+            .await
+            .unwrap();
+        assert_eq!(empty, Hash32::ZERO);
+        let empty_rows: (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM validium_batches WHERE batch_ref = 'br-empty'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(empty_rows.0, 0, "空集不得落库");
+        let anchors_after: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM ledger_anchors WHERE kind = 'state_root'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(anchors_after.0, baseline.0, "空集不得新增锚点");
     }
 
     /// IAM 授权：写入 + 刷新 until。
@@ -927,6 +1156,22 @@ mod tests {
                 .expect("授权行应存在");
         assert!((refreshed - t2).abs() < chrono::Duration::milliseconds(1));
         assert!(refreshed > stored, "刷新后截止时刻应延后");
+
+        // 只延展不缩短（数据库层 WHERE 强制）：提前 until 不得生效
+        let earlier = t1 - chrono::Duration::days(1);
+        services::validium::grant_data_access(&d, &regulator, "coldchain:cn-2026", earlier)
+            .await
+            .unwrap();
+        let shrunk =
+            services::validium::data_access_until(&d, &regulator, "coldchain:cn-2026")
+                .await
+                .unwrap()
+                .expect("授权行应存在");
+        assert!(
+            (shrunk - t2).abs() < chrono::Duration::milliseconds(1),
+            "缩短请求应被忽略，实际 {shrunk}"
+        );
+
         let rows: (i64,) =
             sqlx::query_as("SELECT count(*) FROM data_access_grants WHERE grantee = $1")
                 .bind(regulator.as_str())

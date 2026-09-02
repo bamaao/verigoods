@@ -61,6 +61,24 @@ pub enum CryptoError {
     Signing(String),
 }
 
+/// 生成 Note secret（32 字节，OsRng）。
+///
+/// 应用层不直接接触 RNG——随机性口径统一收敛在 crypto 基础设施。
+pub fn generate_note_secret() -> [u8; 32] {
+    use rand::RngCore;
+    let mut s = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut s);
+    s
+}
+
+/// 生成 Note salt（16 字节，OsRng）。
+pub fn generate_note_salt() -> [u8; 16] {
+    use rand::RngCore;
+    let mut s = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut s);
+    s
+}
+
 /// keccak-256（EVM 变体，与 `vg_domain::shared::Hash32::keccak` 一致）。
 ///
 /// pub 化供 vg-infra-zk 复算 Poseidon2 域分隔标签（跨 crate 共用同一
