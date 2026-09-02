@@ -73,6 +73,17 @@ pub mod ports {
             active: bool,
         ) -> Result<(), DomainError>;
 
+        /// Task 22 合规重算结论回写：仅更新批次的 `compliance_ok` 标记。
+        ///
+        /// 召回联动写 false、恢复联动写 true；批次不存在 →
+        /// [`DomainError::NotFound`]。单品（Asset）无此字段，不适用。
+        async fn update_batch_compliance(
+            &self,
+            ctx: &mut Self::Context,
+            id: &BatchId,
+            compliance_ok: bool,
+        ) -> Result<(), DomainError>;
+
         /// 保存或整体替换单品资产（按 `a.id` 幂等）。
         async fn save_asset(&self, ctx: &mut Self::Context, a: &Asset) -> Result<(), DomainError>;
 
@@ -208,6 +219,17 @@ mod tests {
             let b = ctx.batches.get_mut(id).ok_or(DomainError::NotFound)?;
             b.state = state;
             b.active = active;
+            Ok(())
+        }
+
+        async fn update_batch_compliance(
+            &self,
+            ctx: &mut Self::Context,
+            id: &BatchId,
+            compliance_ok: bool,
+        ) -> Result<(), DomainError> {
+            let b = ctx.batches.get_mut(id).ok_or(DomainError::NotFound)?;
+            b.compliance_ok = compliance_ok;
             Ok(())
         }
 
@@ -437,6 +459,31 @@ mod tests {
             &mut ctx,
             &BatchId::new("nope"),
             LifecycleState::Produced,
+            true,
+        ))
+        .expect_err("不存在的批次必须报 NotFound");
+        assert!(matches!(err, DomainError::NotFound));
+
+        // update_batch_compliance：回写 compliance_ok；不存在 → NotFound
+        block_on(repo.update_batch_compliance(&mut ctx, &BatchId::new("b-l"), false))
+            .expect("合规回写应成功");
+        assert!(
+            !block_on(repo.find_batch(&mut ctx, &BatchId::new("b-l")))
+                .unwrap()
+                .unwrap()
+                .compliance_ok
+        );
+        block_on(repo.update_batch_compliance(&mut ctx, &BatchId::new("b-l"), true))
+            .expect("合规回写应成功");
+        assert!(
+            block_on(repo.find_batch(&mut ctx, &BatchId::new("b-l")))
+                .unwrap()
+                .unwrap()
+                .compliance_ok
+        );
+        let err = block_on(repo.update_batch_compliance(
+            &mut ctx,
+            &BatchId::new("nope"),
             true,
         ))
         .expect_err("不存在的批次必须报 NotFound");
