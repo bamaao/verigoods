@@ -36,6 +36,8 @@ rand = "0.8"
 tracing = "0.1"
 # HTTP 层（vg-api）：tower 为 dev 测试 oneshot（ServiceExt）依赖
 axum = "0.8"
+# 监管解密端点的 ExtraData 密文 base64 编解码（Task 24 REST 层）
+base64 = "0.22"
 dotenvy = "0.15"
 tower = { version = "0.5", features = ["util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

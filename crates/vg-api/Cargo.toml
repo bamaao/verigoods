@@ -5,6 +5,7 @@ edition = "2021"
 description = "VeriGoods HTTP API：Axum 引导、VG-SIG 鉴权中间件、领域错误 HTTP 映射"
 
 [dependencies]
+base64 = { workspace = true }
 vg-domain = { path = "../vg-domain" }
 vg-application = { path = "../vg-application" }
 vg-infra-crypto = { path = "../vg-infra-crypto" }

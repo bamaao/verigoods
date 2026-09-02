@@ -253,6 +253,12 @@ impl IntentEngine {
         Self { deps, handlers }
     }
 
+    /// 只读共享组合根（Task 24：REST 读侧服务 scan_notes /
+    /// check_compliance / validium 等复用同一份装配，不二次构造）。
+    pub fn deps(&self) -> &AppDeps {
+        &self.deps
+    }
+
     /// 执行一条原始意图：全管道编排（见模块级管道图）。
     ///
     /// **幂等口径**：按 `id` 返回当前快照，**不比对载荷**（同 id 不同

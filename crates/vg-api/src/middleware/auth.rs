@@ -17,7 +17,9 @@
 //!
 //! 1. 白名单直通：`/health`，或 `GET /api/v1/consumer`、
 //!    `GET /api/v1/consumer/*`（精确段匹配，排除前缀碰撞路径；只读免签，
-//!    不注入 `AuthedDid`）；
+//!    不注入 `AuthedDid`），以及 `POST /api/v1/dids`（DID 注册是引导
+//!    操作——首个主体尚无签名者，Phase1 直写；actor 合法性属颁发流程
+//!    外的治理问题，Task 24 doc 契约）；
 //! 2. 解析 `VG-SIG` 头：`did="...", sig="0x...", ts=..., nonce="..."`，
 //!    各字段严格格式校验（防注入）：did=`did:vg:`+64hex、sig=0x+130hex、
 //!    ts=纯数字、nonce=`[A-Za-z0-9-_]{1,64}`；畸形一律 401；
@@ -90,6 +92,8 @@ pub async fn vg_sig_auth(
     if path == "/health"
         || (method == Method::GET
             && (path == "/api/v1/consumer" || path.starts_with("/api/v1/consumer/")))
+        // DID 注册引导端点：免签直写（新主体尚无签名者，见模块 doc 第 1 条）
+        || (method == Method::POST && path == "/api/v1/dids")
     {
         return next.run(req).await;
     }
