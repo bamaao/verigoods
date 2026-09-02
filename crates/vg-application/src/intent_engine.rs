@@ -25,7 +25,17 @@
 //! **savepoint 语义**：handler 业务段（聚合写入/outbox/锚定前奏）失败时
 //! `ROLLBACK TO SAVEPOINT handler_sp` 只回滚业务写入，intent 本体
 //! （insert/推进/reject/审计）在 savepoint 之外落库并 commit——审计要求的
-//! 「拒绝也要留痕」由此达成（Intent 永不因 handler 失败而消失）。
+//! 「拒绝也要留痕」由此达成（Intent 永不因 handler 失败而消失；存储层
+//! 自身故障除外——commit 失败即全部丢失）。
+//!
+//! **已知缺口（悬挂锚）**：savepoint 只能回滚**本事务内**的写入；若 handler
+//! 在业务校验/聚合落库**之前**调用独立提交的账本锚定（`ledger.anchor`
+//! 自开事务），Err 路径的 `ROLLBACK TO SAVEPOINT` 撤不掉已提交的锚定，
+//! 形成悬挂锚。且 transfer/lifecycle_change 等 5 种 kind 的账本分录无唯一
+//! 索引，重试会二次记账污染链。**契约**：`ledger.anchor` 必须是 handler 内
+//! 最后一个不可逆步骤（见 [`IntentHandler::handle`]）。Phase2 演进方向：
+//! outbox 驱动锚定 + 对账补偿（锚定与业务写入同事务发 outbox，由投递器
+//! 保证最终一致），届时本缺口闭环。
 //!
 //! **Action 映射**（intent 动作 → identity 能力，见 [`required_capability`]）：
 //! 两套枚举各自演化，映射是本模块唯一的桥接点。
@@ -65,6 +75,11 @@ pub struct RawIntent {
     pub nonce: u64,
     /// 过期时间。
     pub expires_at: DateTime<Utc>,
+    //
+    // 隐含 schema 约定：拒绝路径的审计资源取 `payload["subject"]`（见
+    // `deny_resource`，缺省以动作名兜底）——Task 20 起各 handler 的载荷
+    // **必须**含 `subject` 字段（如 `"batch:bt-1"`），否则拒绝审计的
+    // resource 退化为动作名，可观测性受损。
 }
 
 /// 引擎执行结果（幂等重复提交返回同一结果）。
@@ -80,7 +95,14 @@ pub struct IntentResult {
     pub result_ref: Option<String>,
     /// 拒绝原因（仅 Rejected 有值）。
     pub rejection: Option<String>,
-    /// 是否停在审批门（approvals 存在未决行）。
+    /// 是否停在审批门。
+    ///
+    /// 统一口径：`approvals 行存在 && intent 状态未达 Approved 且非终态`
+    /// （见 [`awaiting_status`]）。三种典型情形：
+    /// - execute 首次停门（status=Proved，行未决）→ true；
+    /// - 幂等重放已 Confirmed（终态）→ false；
+    /// - 并发中途值（status=Proved，行已决策但续跑事务未提交）→ true
+    ///   （仍标等待中，客户端以 `status` 为准判断实际进度）。
     pub awaiting_approval: bool,
 }
 
@@ -89,6 +111,19 @@ pub struct IntentResult {
 /// 职责边界（engine 之外的全部管道段）：业务校验 → policy engine →
 /// prover（需要时）→ ledger.anchor → 聚合变更落库 → outbox 事件；
 /// 并沿路推进 intent 状态（PolicyChecked / ProofRequired / Proved）。
+///
+/// **⚠ 悬挂锚契约**：`ledger.anchor` 必须是 handler 内**最后一个不可逆
+/// 步骤**——所有可能返回 Err 的业务校验与聚合落库全部完成之后才锚定。
+/// 原因：`ledger.anchor` 独立开事务提交，engine 的 `ROLLBACK TO
+/// SAVEPOINT handler_sp` 撤不掉它；若锚定后仍有可失败步骤，Err 回滚会
+/// 留下悬挂锚，且 transfer/lifecycle_change 等 5 种 kind 无唯一索引，
+/// 重试会二次记账污染链。Phase2 将以 outbox 驱动锚定 + 对账补偿闭环。
+///
+/// **SAVEPOINT 嵌套**：handler 可自开更细粒度的 SAVEPOINT 做局部回滚，
+/// 命名必须避开保留名 `handler_sp`（engine 的业务段回滚锚点）。
+///
+/// **载荷 schema 约定**：拒绝路径审计资源取 `payload["subject"]`
+/// （见 [`RawIntent`] 的隐含 schema 说明）。
 ///
 /// **续跑幂等**：L3/L4 审批门场景下 handle 会被调用两次（门内一次、
 /// approve 后一次）。第二次进入时 intent 状态停在门前的位置（如 Proved），
@@ -211,6 +246,10 @@ impl IntentEngine {
     }
 
     /// 执行一条原始意图：全管道编排（见模块级管道图）。
+    ///
+    /// **幂等口径**：按 `id` 返回当前快照，**不比对载荷**（同 id 不同
+    /// payload 的重放得到的是首次意图的结果）；并发下可能返回管道
+    /// 中途态（如 Authorized/Proved）快照。
     pub async fn execute(&self, raw: RawIntent) -> Result<IntentResult, AppError> {
         let mut tx = self.deps.pool.begin().await.map_err(storage_err)?;
         let now = Utc::now();
@@ -232,9 +271,9 @@ impl IntentEngine {
         if let Err(DomainError::AlreadyExists) = self.deps.intents.insert(&mut tx, &intent).await {
             match self.deps.intents.get(&mut tx, &intent.id).await? {
                 Some(existing) => {
-                    // 幂等：返回现有状态（awaiting 由审批行未决推导；终态带回
+                    // 幂等：返回现有状态（awaiting 按统一口径推导；终态带回
                     // result_ref/rejection）。事务无写入，直接释放。
-                    let awaiting = self.is_awaiting(&mut tx, &existing.id).await?;
+                    let awaiting = self.is_awaiting(&mut tx, &existing).await?;
                     return Ok(result_of(&existing, awaiting));
                 }
                 None => return Err(AppError::Domain(DomainError::ReplayDetected)),
@@ -305,14 +344,17 @@ impl IntentEngine {
                 )))
             })?;
 
-        // 已决策：幂等返回当前状态结果（可能仍在门内——上次续跑被业务段拒绝后
-        // 状态已终态，走不到这里；非终态即门内或已完成）。
+        // 已决策：幂等返回当前状态结果。awaiting 按统一口径推导——行已存在，
+        // status 仍在门内（如 Proved，并发中途值）→ true；已达 Approved
+        // 及之后 / 终态 → false。
         if !row.is_undecided() {
-            return Ok(result_of(&intent, false));
+            return Ok(result_of(&intent, awaiting_status(intent.status)));
         }
 
         // 审批人身份：Phase1 口径 = SubjectKind 匹配 required_role；
         // capability 层面的语义由 required_role 承担（Task 20+ 如需收紧再扩）。
+        // 角色不符是**调用方错误**（Unauthorized Err）：不动 intent 状态、
+        // 不动 approvals 行——误触不得杀死意图，待正确角色再来审批。
         let approver_doc = self
             .deps
             .identity
@@ -323,11 +365,10 @@ impl IntentEngine {
             })?;
         let kind = subject_kind_str(&approver_doc.kind);
         if kind != row.required_role {
-            let reason = format!(
-                "审批人主体类型不符：要求 `{}`，实际 `{}`",
+            return Err(AppError::Domain(DomainError::Unauthorized(format!(
+                "审批人角色不符：要求 `{}`，实际 `{}`（意图不受影响，可由正确角色继续审批）",
                 row.required_role, kind
-            );
-            return self.reject_and_commit(tx, intent, reason, now).await;
+            ))));
         }
 
         // 决策一次性写入（并发下 0 行 → AlreadyExists = 他者已决策，幂等返回）。
@@ -337,7 +378,7 @@ impl IntentEngine {
             .mark_decided(&mut tx, &intent.id, approver, now)
             .await
         {
-            return Ok(result_of(&intent, false));
+            return Ok(result_of(&intent, awaiting_status(intent.status)));
         }
 
         // SAVEPOINT 内重跑 handler：handler 查 approvals 已决策 → 过门走后半程。
@@ -482,14 +523,14 @@ impl IntentEngine {
         self.commit(tx, result_of(&intent, false)).await
     }
 
-    /// approvals 是否存在该意图的未决行。
-    async fn is_awaiting(&self, tx: &mut PgTx, id: &IntentId) -> Result<bool, AppError> {
+    /// 统一口径：`approvals 行存在 && 状态未达 Approved 且非终态`。
+    async fn is_awaiting(&self, tx: &mut PgTx, intent: &Intent) -> Result<bool, AppError> {
         Ok(self
             .deps
             .approvals
-            .find(tx, id)
+            .find(tx, &intent.id)
             .await?
-            .is_some_and(|row| row.is_undecided()))
+            .is_some_and(|_| awaiting_status(intent.status)))
     }
 
     /// 审计条目写入（action 词表 = IntentAction snake_case；result ∈ allow|deny）。
@@ -532,6 +573,16 @@ impl IntentEngine {
     }
 }
 
+/// 审批门等待判定（状态侧谓词，统一口径的 `awaiting_approval` 半边）：
+/// 非终态且未达 Approved（Created..=Proved）即视为仍在门内。
+///
+/// 另一半边是「approvals 行存在」——两侧都成立才置 `awaiting_approval`
+/// （行未决的常规情形天然满足；行已决策但续跑事务未提交的并发中途值
+/// 亦为 true，客户端以 `status` 为准）。
+fn awaiting_status(status: IntentStatus) -> bool {
+    !status.is_terminal() && !matches!(status, IntentStatus::Approved | IntentStatus::Submitted)
+}
+
 /// 由 intent 快照拼执行结果。
 fn result_of(intent: &Intent, awaiting_approval: bool) -> IntentResult {
     IntentResult {
@@ -555,8 +606,18 @@ fn deny_resource(intent: &Intent) -> String {
 }
 
 /// SubjectKind 的 snake_case 文本（与 dids 表 CHECK 白名单口径一致）。
+///
+/// 前提锁定：`SubjectKind` 全部为 unit variant（无携带数据的变体），serde
+/// 序列化必产 `Value::String`。`debug_assert` 把该前提固化为哨兵——若未来
+/// 引入带数据变体（序列化为 map 等），测试构建下在此先报警，先于生产
+/// `unreachable` 崩溃暴露。
 fn subject_kind_str(kind: &vg_domain::identity::SubjectKind) -> String {
-    match serde_json::to_value(kind) {
+    let v = serde_json::to_value(kind);
+    debug_assert!(
+        matches!(&v, Ok(Value::String(_))),
+        "SubjectKind 序列化非字符串：{v:?}（unit-variant 前提被打破）"
+    );
+    match v {
         Ok(Value::String(s)) => s,
         _ => unreachable!("SubjectKind 为 unit variant，序列化必为字符串"),
     }
@@ -918,8 +979,9 @@ mod tests {
         let engine = engine(&deps(pool.clone()), vec![handler.clone()]);
 
         // 第一次：停在审批门
+        let r = raw("it-l3-1", IntentAction::TransferProduct, &actor, 1);
         let result = engine
-            .execute(raw("it-l3-1", IntentAction::TransferProduct, &actor, 1))
+            .execute(r.clone())
             .await
             .expect("审批门路径应正常返回");
         assert_eq!(
@@ -968,13 +1030,75 @@ mod tests {
         assert_eq!(row.decided_by.as_deref(), Some("did:vg:user:reg-l3"));
         tx.commit().await.unwrap();
         assert_eq!(audit_count(&pool, "it-l3-1", "allow").await, 1);
+
+        // 幂等重放（已 Confirmed 终态，统一口径第 2 情形）：同 id 重提交
+        // 返回当前快照，awaiting=false（终态且已达 Approved）。
+        let replay = engine
+            .execute(r)
+            .await
+            .expect("Confirmed 后重提交应幂等返回");
+        assert_eq!(replay.status, IntentStatus::Confirmed);
+        assert!(!replay.awaiting_approval, "终态不得再标等待审批");
     }
 
-    /// 审批人角色不符：reject（Unauthorized 原因），审批行保持未决。
+    /// awaiting 统一口径第 3 情形（并发中途值）：status 停在门内（Proved）
+    /// 而 approvals 行**已决策**（他者续跑事务尚未提交/中途失败）——
+    /// approve 幂等返回 true（仍标等待中，客户端以 status 为准），
+    /// 且 handler 不被重跑。
     #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
-    async fn approve_with_wrong_role_rejects(pool: sqlx::PgPool) {
+    async fn awaiting_flag_midvalue_decided_row_still_true(pool: sqlx::PgPool) {
+        let actor = did("did:vg:user:ent-mid");
+        let regulator = did("did:vg:user:reg-mid");
+        seed_actor(
+            &pool,
+            &actor,
+            Some(CapabilityAction::TransferOwnership),
+            false,
+        )
+        .await;
+        seed_actor(&pool, &regulator, None, true).await;
+
+        let handler = Arc::new(GatedTransferHandler {
+            calls: AtomicUsize::new(0),
+        });
+        let engine = engine(&deps(pool.clone()), vec![handler.clone()]);
+        engine
+            .execute(raw("it-mid-1", IntentAction::TransferProduct, &actor, 1))
+            .await
+            .unwrap();
+
+        // 手工把 approvals 行置为已决策（模拟他者 mark 后续跑未提交的中途值）
+        let mut tx = pool.begin().await.unwrap();
+        let approver = did("did:vg:user:reg-mid");
+        PgApprovalsStore
+            .mark_decided(&mut tx, &IntentId::new("it-mid-1"), &approver, Utc::now())
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(intent_status(&pool, "it-mid-1").await, "proved");
+
+        // approve 幂等路径：行已决策、status 仍在门内 → awaiting=true
+        let result = engine
+            .approve(&IntentId::new("it-mid-1"), &regulator)
+            .await
+            .expect("已决策行的 approve 应幂等返回而非报错");
+        assert_eq!(result.status, IntentStatus::Proved);
+        assert!(result.awaiting_approval, "门内中途值仍应标等待审批");
+        assert_eq!(
+            handler.calls.load(Ordering::SeqCst),
+            1,
+            "已决策幂等路径不得重跑 handler"
+        );
+    }
+
+    /// 审批人角色不符：Err(Unauthorized) 且**不消耗审批**——intent 仍
+    /// Proved、approvals 行仍未决、handler 不被重跑；正确角色随后仍可
+    /// 审批通过（误触不得杀死意图）。
+    #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+    async fn approve_with_wrong_role_errors_without_consuming(pool: sqlx::PgPool) {
         let actor = did("did:vg:user:ent-l3w");
         let outsider = did("did:vg:user:ent-other");
+        let regulator = did("did:vg:user:reg-l3w");
         seed_actor(
             &pool,
             &actor,
@@ -983,32 +1107,49 @@ mod tests {
         )
         .await;
         seed_actor(&pool, &outsider, None, false).await;
+        seed_actor(&pool, &regulator, None, true).await;
 
-        let engine = engine(
-            &deps(pool.clone()),
-            vec![Arc::new(GatedTransferHandler {
-                calls: AtomicUsize::new(0),
-            })],
-        );
+        let handler = Arc::new(GatedTransferHandler {
+            calls: AtomicUsize::new(0),
+        });
+        let engine = engine(&deps(pool.clone()), vec![handler.clone()]);
         let result = engine
             .execute(raw("it-l3w-1", IntentAction::TransferProduct, &actor, 1))
             .await
             .unwrap();
         assert!(result.awaiting_approval);
 
-        let rejected = engine
+        // 错误角色：Err(Unauthorized)，非业务 Rejected 结果
+        match engine
             .approve(&IntentId::new("it-l3w-1"), &outsider)
             .await
-            .expect("角色不符是业务拒绝（Rejected 结果），非 Err");
-        assert_eq!(rejected.status, IntentStatus::Rejected);
-        assert!(
-            rejected
-                .rejection
-                .as_deref()
-                .is_some_and(|r| r.contains("主体类型不符")),
-            "实际：{rejected:?}"
-        );
-        assert_eq!(audit_count(&pool, "it-l3w-1", "deny").await, 1);
+        {
+            Err(AppError::Domain(DomainError::Unauthorized(msg))) => {
+                assert!(msg.contains("角色不符"), "实际消息：{msg}");
+            }
+            other => panic!("角色不符应报 Err(Unauthorized)，实际：{other:?}"),
+        }
+
+        // 不动 intent、不动 approvals 行、handler 不重跑、无 deny 审计
+        assert_eq!(intent_status(&pool, "it-l3w-1").await, "proved");
+        let mut tx = pool.begin().await.unwrap();
+        let row = PgApprovalsStore
+            .find(&mut tx, &IntentId::new("it-l3w-1"))
+            .await
+            .unwrap()
+            .expect("审批待办行应存在");
+        assert!(row.is_undecided(), "角色不符不得消耗审批（行仍未决）");
+        tx.commit().await.unwrap();
+        assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(audit_count(&pool, "it-l3w-1", "deny").await, 0);
+
+        // 正确角色随后仍走通：Confirmed
+        let approved = engine
+            .approve(&IntentId::new("it-l3w-1"), &regulator)
+            .await
+            .expect("正确角色审批应 Confirmed");
+        assert_eq!(approved.status, IntentStatus::Confirmed);
+        assert!(!approved.awaiting_approval);
     }
 
     /// nonce 冲突：同 actor 同 nonce 异 id 二次 execute → ReplayDetected。
@@ -1322,6 +1463,19 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(biz.0, 0, "事务内业务写入应被 savepoint 回滚撤销");
+    }
+
+    /// awaiting_status 谓词穷举：门内（Created..=Proved）true；
+    /// Approved 及之后 / 终态 false。
+    #[test]
+    fn awaiting_status_covers_all_statuses() {
+        use IntentStatus::*;
+        for s in [Created, Validated, Authorized, PolicyChecked, ProofRequired, Proved] {
+            assert!(awaiting_status(s), "{s:?} 应视为门内");
+        }
+        for s in [Approved, Submitted, Confirmed, Rejected, Expired, Cancelled] {
+            assert!(!awaiting_status(s), "{s:?} 不得视为门内");
+        }
     }
 
     /// 映射表穷举：required_capability 覆盖全部 13 动作且与文档表一致。
