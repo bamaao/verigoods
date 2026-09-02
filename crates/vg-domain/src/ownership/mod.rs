@@ -72,6 +72,17 @@ pub mod ports {
             state: &OwnershipState,
         ) -> Result<(), DomainError>;
 
+        /// 按主体查询当前保管状态；不存在时返回 `Ok(None)`。
+        ///
+        /// 读侧自然延伸：`update_custody` 的写入对称面，供应用层读取
+        /// 现任 custodian（保管链条交接的前手校验、CustodyChanged 事件的
+        /// `from` 字段等），消除 handler 直查 SQL 的层级泄漏。
+        async fn get_custody(
+            &self,
+            ctx: &mut Self::Context,
+            subject: &SubjectRef,
+        ) -> Result<Option<CustodyState>, DomainError>;
+
         /// 记录一次保管状态（upsert：无则建档，有则覆盖 custodian/since）。
         ///
         /// 保管与所有权的存储完全独立，本方法不读取也不校验所有权档案。
@@ -154,6 +165,14 @@ mod tests {
             // 整体替换（upsert）：正常流程先经 init_owner 建档
             ctx.owners.insert(state.subject.clone(), state.clone());
             Ok(())
+        }
+
+        async fn get_custody(
+            &self,
+            ctx: &mut Self::Context,
+            subject: &SubjectRef,
+        ) -> Result<Option<CustodyState>, DomainError> {
+            Ok(ctx.custody.get(subject).cloned())
         }
 
         async fn update_custody(
@@ -254,14 +273,22 @@ mod tests {
             .expect("刚建档的所有权应能查到");
         assert_eq!(found, state);
 
-        // 初始托管登记并回读（保管档案经 ctx 直读——端口只暴露写入侧）
+        // 初始托管登记并经端口回读（get_custody 读侧对称面）
+        assert!(
+            block_on(repo.get_custody(&mut ctx, &subject))
+                .expect("查询不应报错")
+                .is_none(),
+            "未建档前 get_custody 应为 None"
+        );
         let courier = Did::parse("did:vg:user:courier-a").unwrap();
         block_on(repo.update_custody(
             &mut ctx,
             &CustodyState::new(subject.clone(), courier.clone(), fixed_time()),
         ))
         .expect("托管登记应成功");
-        let stored_custody = ctx.custody.get(&subject).expect("保管档案应存在").clone();
+        let stored_custody = block_on(repo.get_custody(&mut ctx, &subject))
+            .expect("查询不应报错")
+            .expect("刚登记的保管档案应能查到");
         assert_eq!(stored_custody.custodian, courier);
         assert_eq!(stored_custody.since, fixed_time());
 
