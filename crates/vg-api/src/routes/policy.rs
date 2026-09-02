@@ -15,7 +15,6 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use vg_domain::policy::ports::PolicyRepository;
 use vg_domain::policy::Policy;
 use vg_domain::shared::{DomainError, Hash32, PolicyId};
 use vg_infra_crypto::keccak256;
@@ -36,9 +35,11 @@ pub async fn list(
     let product_type = params
         .get("product_type")
         .ok_or_else(|| ApiError::bad_request("缺少必填 query 参数 product_type"))?;
-    let repo = vg_infra_pg::PgPolicyRepository;
     let mut tx = begin_tx(&state.pool).await?;
-    let policies = repo
+    let policies = state
+        .engine
+        .deps()
+        .policies
         .policies_for(&mut tx, jurisdiction, product_type)
         .await?;
     tx.commit()
@@ -54,9 +55,13 @@ pub async fn create(
     crate::AppJson(policy): crate::AppJson<Policy>,
 ) -> Result<(StatusCode, Json<Policy>), ApiError> {
     // 先库后锚（悬挂锚契约）
-    let repo = vg_infra_pg::PgPolicyRepository;
     let mut tx = begin_tx(&state.pool).await?;
-    repo.save_policy(&mut tx, &policy).await?;
+    state
+        .engine
+        .deps()
+        .policies
+        .save_policy(&mut tx, &policy)
+        .await?;
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;
@@ -88,9 +93,11 @@ pub async fn get(
     let version: u64 = version
         .parse()
         .map_err(|_| ApiError::bad_request("version 路径参数必须为非负整数"))?;
-    let repo = vg_infra_pg::PgPolicyRepository;
     let mut tx = begin_tx(&state.pool).await?;
-    let policy = repo
+    let policy = state
+        .engine
+        .deps()
+        .policies
         .find_policy(&mut tx, &PolicyId::new(id), version)
         .await?;
     tx.commit()

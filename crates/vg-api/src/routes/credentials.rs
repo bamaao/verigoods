@@ -14,7 +14,6 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde_json::Value;
 use std::collections::HashMap;
-use vg_domain::credential::ports::CredentialRepository;
 use vg_domain::credential::VerifiableCredential;
 use vg_domain::intent::IntentAction;
 use vg_domain::shared::{Did, DomainError};
@@ -79,9 +78,13 @@ pub async fn list(
         .get("subject")
         .ok_or_else(|| ApiError::bad_request("缺少必填 query 参数 subject（DID）"))?;
     let did = Did::parse(raw)?;
-    let repo = vg_infra_pg::PgCredentialRepo;
     let mut tx = begin_tx(&state.pool).await?;
-    let vcs = repo.list_by_subject(&mut tx, &did).await?;
+    let vcs = state
+        .engine
+        .deps()
+        .credentials
+        .list_by_subject(&mut tx, &did)
+        .await?;
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;

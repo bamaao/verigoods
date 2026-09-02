@@ -7,15 +7,17 @@
 //!   `execute(SplitBatch)`；
 //! - `POST /api/v1/batches/{batch_id}/merge`：body = `{intent_id?,
 //!   on_behalf_of?, children:[batch_id...], new_batch_id}`（subject =
-//!   `Batch(new_batch_id)`，与 handler M2 校验口径一致）→
-//!   `execute(MergeBatch)`；
+//!   `Batch(new_batch_id)`，与 handler M2 校验口径一致；**路径 batch_id
+//!   必须属于 body.children**，否则 400——消除"路径参数形同虚设"的
+//!   API 歧义）→ `execute(MergeBatch)`；
 //! - `POST /api/v1/assets`：body = `{intent_id?, on_behalf_of?, subject,
 //!   product_id, authenticity_commitment, manufacturer?}` →
 //!   `execute(CreateItem)`；
 //! - `GET /api/v1/batches/{batch_id}`：聚合视图（batch/lineage/owner/
 //!   transfer_count/c2c_count/state，短事务）；
 //! - `POST /api/v1/products`：**建档引导操作**（无对应 intent action，
-//!   Phase1 直写 `commodity.save_product`）→ 201；
+//!   Phase1 直写 `commodity.save_product`；控制器追认：建档引导操作
+//!   走 VG-SIG 直写，Phase2 可改 IntentAction）→ 201；
 //! - `GET /api/v1/products/{id}`：200/404。
 
 use axum::extract::{Path, State};
@@ -71,15 +73,28 @@ pub async fn split_batch(
 }
 
 /// 合并批次（subject 指向合并产物新批，与 handler M2 校验一致）。
+///
+/// 路径 `batch_id` 必须属于 `body.children`（消除 API 歧义：路径参数
+/// 不是任意命名空间定位，而是参与合并的父批之一），否则 400。
 pub async fn merge_batch(
     State(state): State<SharedState>,
     axum::Extension(AuthedDid(actor)): axum::Extension<AuthedDid>,
-    Path(_batch_id): Path<String>,
+    Path(batch_id): Path<String>,
     crate::AppJson(body): crate::AppJson<Value>,
 ) -> Result<axum::Json<vg_application::IntentResult>, ApiError> {
     let (intent_id, on_behalf_of, mut payload) = split_meta(body)?;
-    // subject = Batch(new_batch_id)：路径 batch_id 仅为路由定位（参与合并
-    // 的父批全集以 body.children 为准），业务口径见 handler doc。
+    // 路径 batch_id 必须出现在 children 中（消除路径参数形同虚设的歧义）
+    let in_children = payload
+        .get("children")
+        .and_then(Value::as_array)
+        .is_some_and(|arr| arr.iter().any(|c| c.as_str() == Some(&batch_id)));
+    if !in_children {
+        return Err(ApiError::bad_request(
+            "路径 batch_id 必须是 body.children 中的父批之一（消除 API 歧义）",
+        ));
+    }
+    // subject = Batch(new_batch_id)：合并产物新批为业务主体，
+    // 参与合并的父批全集以 body.children 为准，业务口径见 handler doc。
     let new_batch_id = payload
         .get("new_batch_id")
         .and_then(Value::as_str)

@@ -13,7 +13,6 @@ use axum::Json;
 use serde_json::Value;
 use std::collections::HashMap;
 use vg_domain::intent::IntentAction;
-use vg_domain::ownership::ports::OwnershipRepository;
 use vg_domain::ownership::TransferRecord;
 use vg_domain::shared::DomainError;
 
@@ -67,9 +66,13 @@ pub async fn history(
         ApiError::bad_request("缺少必填 query 参数 subject（batch:<id> / asset:<id>）")
     })?;
     let subject = parse_subject_param(raw)?;
-    let repo = vg_infra_pg::PgOwnershipRepo;
     let mut tx = begin_tx(&state.pool).await?;
-    let records = repo.history(&mut tx, &subject).await?;
+    let records = state
+        .engine
+        .deps()
+        .ownership
+        .history(&mut tx, &subject)
+        .await?;
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;

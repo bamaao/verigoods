@@ -140,6 +140,34 @@ impl Signer {
         };
         builder.body(body).unwrap()
     }
+
+    /// 以指定 did（密钥轮换场景：新钥挂在旧 did 文档下）签名请求。
+    fn request_as(&self, did: &str, method: &str, path: &str) -> Request<Body> {
+        let nonce = self.nonce.get() + 1;
+        self.nonce.set(nonce);
+        let ts = Utc::now().timestamp();
+        let method_obj = Method::from_bytes(method.as_bytes()).unwrap();
+        let pure_path = path.split('?').next().unwrap_or(path);
+        let nonce_str = format!("rot-{nonce}");
+        let msg =
+            vg_api::middleware::auth::sign_message(&method_obj, pure_path, ts, &nonce_str);
+        let (sig, rid) = self.kp.sign_recoverable(msg.as_bytes()).unwrap();
+        let mut s65 = [0u8; 65];
+        s65[..64].copy_from_slice(&sig.to_bytes());
+        s65[64] = 27 + u8::from(rid.is_y_odd());
+        Request::builder()
+            .method(method_obj)
+            .uri(path)
+            .header(
+                "VG-SIG",
+                format!(
+                    "did=\"{did}\", sig=\"0x{}\", ts={ts}, nonce=\"{nonce_str}\"",
+                    hex::encode(s65)
+                ),
+            )
+            .body(Body::empty())
+            .unwrap()
+    }
 }
 
 async fn send(router: &Router, req: Request<Body>) -> (StatusCode, Value) {
@@ -181,7 +209,8 @@ async fn full_lifecycle_scenario(pool: sqlx::PgPool) {
     let did_a = did_of(&ent_a);
     let did_b = did_of(&ent_b);
 
-    // DID 注册：免签引导端点，首次 201 / 重复 200（全新主体，未落过库）
+    // DID 注册：免签引导端点（仅首次创建 + 自派生绑定）
+    // 首次 201；重复注册 409（insert-only，防 upsert 劫持）
     let fresh = KeyPair::generate();
     let fresh_did = did_of(&fresh);
     let doc_b = json!({
@@ -204,12 +233,29 @@ async fn full_lifecycle_scenario(pool: sqlx::PgPool) {
     )
     .await;
     assert_eq!(s, StatusCode::CREATED, "首次 DID 注册应 201");
-    let (s, _) = send(
+    let (s, v) = send(
         &router,
         Signer::request(&Signer::new(KeyPair::generate()), "POST", "/api/v1/dids", Some(doc_b)),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "重复注册应 upsert 200");
+    assert_eq!(s, StatusCode::CONFLICT, "重复注册应 409（insert-only 防劫持）：{v}");
+    // did 与首个验证方法公钥摘要不一致 → 400（自派生绑定，防抢注）
+    let other = KeyPair::generate();
+    let hijack = json!({
+        "did": fresh_did,
+        "kind": "enterprise",
+        "methods": [{ "id": "k-0", "key_type": "secp256k1",
+                      "public_key": other.pubkey_digest().as_hex(),
+                      "controller": fresh_did, "revoked": false }],
+        "parent": null, "jurisdiction": "cn",
+        "created_at": Utc::now().to_rfc3339(),
+    });
+    let (s, v) = send(
+        &router,
+        Signer::request(&Signer::new(KeyPair::generate()), "POST", "/api/v1/dids", Some(hijack)),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "did 与公钥摘要不一致应 400：{v}");
 
     // GET /dids/{did}（需签）
     let (s, v) = send(
@@ -717,4 +763,125 @@ async fn validium_root_and_grant_then_decrypt_key_error(pool: sqlx::PgPool) {
         "有授权应过 403 闸门，坏密文/私钥报 400：{v}"
     );
     assert_eq!(v["code"], "invalid_input");
+}
+
+// ---------- 辅助：DID 签名更新（密钥轮换 PUT /api/v1/dids） ----------
+
+#[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+async fn did_key_rotation_via_signed_put(pool: sqlx::PgPool) {
+    let state = test_state(pool.clone());
+    let router = vg_api::build_router(state);
+    let old = seed_identity(&pool, SubjectKind::Enterprise, None, &[]).await;
+    let did = did_of(&old);
+    let new_kp = KeyPair::generate();
+
+    // 他人（另一签名者）不能替我更新 → 401
+    let stranger = seed_identity(&pool, SubjectKind::Enterprise, None, &[]).await;
+    let s_stranger = Signer::new(stranger);
+    let mut doc = json!({
+        "did": did,
+        "kind": "enterprise",
+        "methods": [{ "id": "k-1", "key_type": "secp256k1",
+                      "public_key": new_kp.pubkey_digest().as_hex(),
+                      "controller": did, "revoked": false }],
+        "parent": null, "jurisdiction": null,
+        "created_at": Utc::now().to_rfc3339(),
+    });
+    let (s, v) = send(
+        &router,
+        s_stranger.request("PUT", "/api/v1/dids", Some(doc.clone())),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "他人替更新应 401：{v}");
+
+    // 本人签名 PUT 轮换 methods → 200（全量替换，旧钥立即失效）
+    let s_old = Signer::new(old.clone());
+    doc["created_at"] = Utc::now().to_rfc3339().into();
+    let (s, v) = send(&router, s_old.request("PUT", "/api/v1/dids", Some(doc))).await;
+    assert_eq!(s, StatusCode::OK, "本人签名轮换应 200：{v}");
+
+    // 新钥可签名（挂旧 did 文档下签名），旧钥 401
+    let s_new = Signer::new(new_kp);
+    let (s, v) = send(
+        &router,
+        s_new.request_as(&did, "GET", &format!("/api/v1/dids/{did}")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "轮换后新钥应可签名：{v}");
+    let (s, _) = send(
+        &router,
+        s_old.request("GET", &format!("/api/v1/dids/{did}"), None),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "轮换后旧钥应 401");
+}
+
+// ---------- 辅助：merge 路径 batch_id 必须 ∈ body.children ----------
+
+#[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+async fn merge_path_batch_id_must_be_in_children(pool: sqlx::PgPool) {
+    use vg_domain::identity::Action;
+    let state = test_state(pool.clone());
+    let router = vg_api::build_router(state);
+    let ent = seed_identity(
+        &pool,
+        SubjectKind::Enterprise,
+        Some("cn".into()), // 生产者建批需要辖区信息
+        &[Action::CreateBatch, Action::TransferOwnership],
+    )
+    .await;
+    let a = Signer::new(ent);
+
+    // 建产品 + 两个父批
+    let (s, v) = send(
+        &router,
+        a.request(
+            "POST",
+            "/api/v1/products",
+            Some(json!({"product_id": "pd-merge", "category": "milk",
+                        "metadata_hash": "11".repeat(32)})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "产品建档应 201：{v}");
+    for (id, qty) in [("bt-m1", 30u64), ("bt-m2", 20u64)] {
+        let (_, v) = send(
+            &router,
+            a.request(
+                "POST",
+                "/api/v1/batches",
+                Some(json!({
+                    "subject": {"type": "batch", "id": id},
+                    "product_id": "pd-merge", "quantity": qty, "unit": "kg"
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(v["status"], "confirmed", "建批 {id} 应 Confirmed：{v}");
+    }
+
+    // 路径 batch_id 不在 children 中 → 400（消除 API 歧义）
+    let (s, v) = send(
+        &router,
+        a.request(
+            "POST",
+            "/api/v1/batches/bt-none/merge",
+            Some(json!({"children": ["bt-m1", "bt-m2"], "new_batch_id": "bt-m"})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "路径不在 children 应 400：{v}");
+
+    // 路径 ∈ children → 200 且合并直达 Confirmed
+    let (s, v) = send(
+        &router,
+        a.request(
+            "POST",
+            "/api/v1/batches/bt-m1/merge",
+            Some(json!({"children": ["bt-m1", "bt-m2"], "new_batch_id": "bt-m"})),
+        ),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "合法合并应 200：{v}");
+    assert_eq!(v["status"], "confirmed", "合并应直达 Confirmed：{v}");
 }

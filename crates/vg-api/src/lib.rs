@@ -29,8 +29,9 @@ pub use state::{AppState, NonceStore};
 /// 中间件。main 只做 bootstrap + serve；auth 集成测试复用同一函数。
 ///
 /// 鉴权矩阵：除 `GET /api/v1/consumer/*`（免签）与
-/// `POST /api/v1/dids`（引导直写）外全部需 VG-SIG 签名（白名单见
-/// `middleware::auth`）。
+/// `POST /api/v1/dids`（仅首次创建免签 + did 自派生绑定，见
+/// `routes::identity`）外全部需 VG-SIG 签名（白名单见
+/// `middleware::auth`）；DID 更新（`PUT /api/v1/dids`）需签名。
 pub fn build_router(state: state::SharedState) -> axum::Router {
     use axum::middleware::from_fn_with_state;
     use axum::routing::{get, post};
@@ -38,7 +39,10 @@ pub fn build_router(state: state::SharedState) -> axum::Router {
     let router = axum::Router::new()
         .route("/health", get(routes::health::health))
         // ---- 身份（注册免签引导，查询需签） ----
-        .route("/api/v1/dids", post(routes::identity::register))
+        .route(
+            "/api/v1/dids",
+            post(routes::identity::register).put(routes::identity::update),
+        )
         .route("/api/v1/dids/{did}", get(routes::identity::get))
         // ---- 凭证 ----
         .route(
