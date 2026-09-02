@@ -24,6 +24,7 @@ pub mod deps;
 pub mod error;
 pub mod handlers;
 pub mod intent_engine;
+pub mod services;
 
 pub use deps::{AppDeps, PgTx};
 pub use error::AppError;

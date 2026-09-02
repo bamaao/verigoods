@@ -2254,13 +2254,18 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "hex",
+ "k256",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sqlx",
  "thiserror",
  "tokio",
  "vg-domain",
+ "vg-infra-crypto",
  "vg-infra-pg",
+ "vg-infra-zk",
 ]
 
 [[package]]

@@ -15,6 +15,7 @@
 //!   仅 TransferProduct 锚定，custody 不上链（Phase1 口径）。
 
 pub mod commodity;
+pub mod shielded;
 pub mod transfer;
 
 use std::sync::Arc;
@@ -29,7 +30,7 @@ use vg_domain::shared::{Did, DomainError, SubjectRef};
 use crate::deps::{AppDeps, PgTx};
 use crate::intent_engine::HandlerMap;
 
-/// 注册 Task 20 的默认处理器集合（6 个动作）。
+/// 注册默认处理器集合（Task 20 六动作 + Task 21 ShieldedTransfer）。
 ///
 /// bootstrap（Task 23）经此一键装配；同动作后注册覆盖先注册。
 pub fn register_default(map: &mut HandlerMap) {
@@ -39,6 +40,7 @@ pub fn register_default(map: &mut HandlerMap) {
     map.register(Arc::new(commodity::CreateItemHandler));
     map.register(Arc::new(transfer::TransferPublicHandler));
     map.register(Arc::new(transfer::UpdateCustodyHandler));
+    map.register(Arc::new(shielded::ShieldedTransferHandler));
 }
 
 /// subject 的审计/资源编码（与 infra `encode_subject` 同一口径）：
