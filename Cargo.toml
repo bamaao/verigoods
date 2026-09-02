@@ -34,6 +34,10 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 rand = "0.8"
 tracing = "0.1"
+# HTTP 层（vg-api）：tower 为 dev 测试 oneshot（ServiceExt）依赖
+axum = "0.8"
+dotenvy = "0.15"
+tower = { version = "0.5", features = ["util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # sqlx：PG 访问层（运行时 tokio；ID 全 String 故不需要 uuid feature）
 sqlx = { version = "0.8", default-features = false, features = [

@@ -1,0 +1,32 @@
+[package]
+name = "vg-api"
+version = "0.1.0"
+edition = "2021"
+description = "VeriGoods HTTP API：Axum 引导、VG-SIG 鉴权中间件、领域错误 HTTP 映射"
+
+[dependencies]
+vg-domain = { path = "../vg-domain" }
+vg-application = { path = "../vg-application" }
+vg-infra-crypto = { path = "../vg-infra-crypto" }
+vg-infra-pg = { path = "../vg-infra-pg" }
+vg-infra-zk = { path = "../vg-infra-zk" }
+axum = { workspace = true }
+chrono = { workspace = true }
+dotenvy = { workspace = true }
+hex = { workspace = true }
+k256 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[features]
+# transparent 模式：用 TransparentProver 替代 Plonky ProverDispatcher
+# （复用 vg-infra-zk 的 test-util feature，默认关闭）。
+transparent = ["vg-infra-zk/test-util"]
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
