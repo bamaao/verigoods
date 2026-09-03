@@ -106,13 +106,11 @@ async fn assess(
         .identity
         .find_document(tx, &owner)
         .await?
-        .ok_or_else(|| {
-            DomainError::InvalidInput(format!("归属者 {owner} 的 DID 文档不存在"))
-        })?;
-    let jurisdiction =
-        doc.jurisdiction
-            .clone()
-            .ok_or_else(|| DomainError::InvalidInput(format!("归属者 {owner} 缺少辖区信息")))?;
+        .ok_or_else(|| DomainError::InvalidInput(format!("归属者 {owner} 的 DID 文档不存在")))?;
+    let jurisdiction = doc
+        .jurisdiction
+        .clone()
+        .ok_or_else(|| DomainError::InvalidInput(format!("归属者 {owner} 缺少辖区信息")))?;
     // 商品类目 = 策略 product_type 选择键
     let category = product_category_of(deps, tx, subject).await?;
     // 候选策略取全量（含未生效/已过期），is_active(now) 过滤在此收敛
@@ -261,10 +259,7 @@ pub async fn recompute_compliance(
     let aggregate = format!("intent:{}", intent_id.as_ref());
 
     // 分支 1：凭证缺失 → 监管强制召回（任意非终态 → Recalled）
-    if !compliant
-        && cur != LifecycleState::Recalled
-        && !cur.is_terminal()
-    {
+    if !compliant && cur != LifecycleState::Recalled && !cur.is_terminal() {
         let reason = format!(
             "凭证缺失自动召回：{}",
             assessment
@@ -311,12 +306,10 @@ pub async fn recompute_compliance(
         // 辖区/策略/凭证均复用 assess 已取数据（无重复查询）
         // 恢复门第一道：存在生效且声明 (Recalled, Available) 边的策略
         let policies = &assessment.policies;
-        let allows_restore = policies
-            .iter()
-            .any(|p| p.is_active(now) && p.allows_transition(
-                LifecycleState::Recalled,
-                LifecycleState::Available,
-            ));
+        let allows_restore = policies.iter().any(|p| {
+            p.is_active(now)
+                && p.allows_transition(LifecycleState::Recalled, LifecycleState::Available)
+        });
         if allows_restore {
             // 恢复门第二道：引擎对该迁移的凭证核验（required_proofs 空
             // 集合按无证明要求处理；核验不过 → 保持 Recalled，不报错中断

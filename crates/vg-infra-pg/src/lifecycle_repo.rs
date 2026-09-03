@@ -133,7 +133,12 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 8, 25, 6, 0, 0).unwrap()
     }
 
-    fn make_event(id: &str, subject: &SubjectRef, from: LifecycleState, to: LifecycleState) -> LifecycleEvent {
+    fn make_event(
+        id: &str,
+        subject: &SubjectRef,
+        from: LifecycleState,
+        to: LifecycleState,
+    ) -> LifecycleEvent {
         LifecycleEvent::new(
             id,
             subject.clone(),
@@ -175,7 +180,10 @@ mod tests {
         );
         // e2 用更晚时刻（later_time 也要带：make_event 固定 fixed_time，
         // 故这里手工调 at 保证 at 有序）
-        let e2 = LifecycleEvent { at: later_time(), ..e2 };
+        let e2 = LifecycleEvent {
+            at: later_time(),
+            ..e2
+        };
         repo.append(&mut tx, &e1).await.expect("追加 e1 应成功");
         repo.append(&mut tx, &e2).await.expect("追加 e2 应成功");
 

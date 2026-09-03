@@ -92,7 +92,11 @@ impl OwnershipRepository for PgOwnershipRepo {
     }
 
     /// 整体替换保存所有权（转移写路径 get → transfer → save 的落库端）。
-    async fn save(&self, ctx: &mut Self::Context, state: &OwnershipState) -> Result<(), DomainError> {
+    async fn save(
+        &self,
+        ctx: &mut Self::Context,
+        state: &OwnershipState,
+    ) -> Result<(), DomainError> {
         sqlx::query(
             "INSERT INTO ownership_states \
                  (subject, owner, acquired_at, transfer_count, c2c_count) \
@@ -144,13 +148,12 @@ impl OwnershipRepository for PgOwnershipRepo {
         ctx: &mut Self::Context,
         subject: &SubjectRef,
     ) -> Result<Option<CustodyState>, DomainError> {
-        let row = sqlx::query(
-            "SELECT subject, custodian, since FROM custody_states WHERE subject = $1",
-        )
-        .bind(encode_subject(subject))
-        .fetch_optional(&mut **ctx)
-        .await
-        .map_err(storage)?;
+        let row =
+            sqlx::query("SELECT subject, custodian, since FROM custody_states WHERE subject = $1")
+                .bind(encode_subject(subject))
+                .fetch_optional(&mut **ctx)
+                .await
+                .map_err(storage)?;
         row.map(|r| {
             Ok(CustodyState {
                 subject: decode_subject(r.get("subject"))?,
@@ -269,12 +272,19 @@ mod tests {
         let mut tx = pool.begin().await.unwrap();
 
         // 空库：get None
-        assert!(repo.get(&mut tx, &batch_subject("b-own")).await.unwrap().is_none());
+        assert!(repo
+            .get(&mut tx, &batch_subject("b-own"))
+            .await
+            .unwrap()
+            .is_none());
 
         // 建档（batch 主体）→ 往返
         let state = OwnershipState::initialize(batch_subject("b-own"), alice(), fixed_time());
         repo.init_owner(&mut tx, &state).await.expect("建档应成功");
-        assert_eq!(repo.get(&mut tx, &state.subject).await.unwrap(), Some(state.clone()));
+        assert_eq!(
+            repo.get(&mut tx, &state.subject).await.unwrap(),
+            Some(state.clone())
+        );
 
         // 同主体二次建档（asset 主体同样验证）→ AlreadyExists（合约 "owner exists"）
         let dup = OwnershipState::initialize(batch_subject("b-own"), bob(), later_time());
@@ -284,7 +294,14 @@ mod tests {
             .expect_err("重复建档必须被拒绝");
         assert!(matches!(err, DomainError::AlreadyExists), "{err:?}");
         // 原档案不被覆盖
-        assert_eq!(repo.get(&mut tx, &state.subject).await.unwrap().unwrap().owner, alice());
+        assert_eq!(
+            repo.get(&mut tx, &state.subject)
+                .await
+                .unwrap()
+                .unwrap()
+                .owner,
+            alice()
+        );
 
         let asset_state = OwnershipState::initialize(asset_subject("a-own"), carol(), fixed_time());
         repo.init_owner(&mut tx, &asset_state).await.unwrap();

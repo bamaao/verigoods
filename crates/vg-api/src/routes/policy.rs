@@ -105,7 +105,9 @@ pub async fn get(
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;
-    policy.map(Json).ok_or(ApiError::from(DomainError::NotFound))
+    policy
+        .map(Json)
+        .ok_or(ApiError::from(DomainError::NotFound))
 }
 
 /// 递归键排序的规范化 JSON 序列化（与 VC credential_hash 的规范化口径
@@ -125,8 +127,7 @@ fn canonical_json(v: &Value) -> String {
             format!("{{{}}}", inner.join(","))
         }
         Value::Array(items) => {
-            let inner: Vec<String> =
-                items.iter().map(canonical_json).collect();
+            let inner: Vec<String> = items.iter().map(canonical_json).collect();
             format!("[{}]", inner.join(","))
         }
         // 其余标量：serde_json 紧凑序列化（字符串带引号、数字原样）
@@ -145,9 +146,6 @@ mod tests {
         let a = json!({"b": 1, "a": {"y": [1, 2], "x": "s"}});
         let b = json!({"a": {"x": "s", "y": [1, 2]}, "b": 1});
         assert_eq!(canonical_json(&a), canonical_json(&b));
-        assert_eq!(
-            canonical_json(&json!({"b":1,"a":2})),
-            r#"{"a":2,"b":1}"#
-        );
+        assert_eq!(canonical_json(&json!({"b":1,"a":2})), r#"{"a":2,"b":1}"#);
     }
 }

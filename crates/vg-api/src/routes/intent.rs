@@ -72,9 +72,6 @@ pub async fn approve(
             return Err(ApiError::bad_request("审批请求体必须为 JSON 对象（或空）"));
         }
     }
-    let result = state
-        .engine
-        .approve(&IntentId::new(id), &approver)
-        .await?;
+    let result = state.engine.approve(&IntentId::new(id), &approver).await?;
     Ok(Json(result))
 }

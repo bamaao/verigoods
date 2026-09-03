@@ -261,13 +261,14 @@ async fn find_document(
     did: &Did,
 ) -> Result<Option<vg_domain::identity::DidDocument>, vg_domain::shared::DomainError> {
     let repo = vg_infra_pg::PgIdentityRepo;
-    let mut tx = state.pool.begin().await.map_err(|e| {
-        vg_domain::shared::DomainError::Storage(format!("鉴权事务开启失败：{e}"))
-    })?;
+    let mut tx =
+        state.pool.begin().await.map_err(|e| {
+            vg_domain::shared::DomainError::Storage(format!("鉴权事务开启失败：{e}"))
+        })?;
     let doc = repo.find_document(&mut tx, did).await?;
-    tx.commit().await.map_err(|e| {
-        vg_domain::shared::DomainError::Storage(format!("鉴权事务提交失败：{e}"))
-    })?;
+    tx.commit()
+        .await
+        .map_err(|e| vg_domain::shared::DomainError::Storage(format!("鉴权事务提交失败：{e}")))?;
     Ok(doc)
 }
 
@@ -401,12 +402,8 @@ mod tests {
     async fn seed_identity(pool: &sqlx::PgPool, revoked_only: bool) -> KeyPair {
         let kp = KeyPair::generate();
         let did = Did::parse(&vg_infra_crypto::pubkey_to_did(kp.public())).unwrap();
-        let mut method = VerificationMethod::new(
-            "k-0",
-            KeyType::Secp256k1,
-            kp.pubkey_digest(),
-            did.clone(),
-        );
+        let mut method =
+            VerificationMethod::new("k-0", KeyType::Secp256k1, kp.pubkey_digest(), did.clone());
         method.revoked = revoked_only;
         let doc = DidDocument {
             did,
@@ -483,7 +480,10 @@ mod tests {
             .uri(path)
             .header(
                 "VG-SIG",
-                format!("did=\"{did}\", sig=\"0x{}\", ts={ts}, nonce=\"{nonce}\"", hex::encode(s65)),
+                format!(
+                    "did=\"{did}\", sig=\"0x{}\", ts={ts}, nonce=\"{nonce}\"",
+                    hex::encode(s65)
+                ),
             )
             .body(Body::empty())
             .unwrap()
@@ -614,7 +614,10 @@ mod tests {
         // /health 免签
         let (s1, _) = send(
             &router,
-            Request::builder().uri("/health").body(Body::empty()).unwrap(),
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
         )
         .await;
         assert_eq!(s1, StatusCode::OK, "/health 应免签");
@@ -667,7 +670,11 @@ mod tests {
         let v = req.headers().get("VG-SIG").unwrap().clone();
         req.headers_mut().append("VG-SIG", v);
         let (status, body) = send(&router, req).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "重复 VG-SIG 头应 401：{body}");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "重复 VG-SIG 头应 401：{body}"
+        );
     }
 
     #[sqlx::test(migrations = "../vg-infra-pg/migrations")]

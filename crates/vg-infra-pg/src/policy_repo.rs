@@ -33,7 +33,10 @@ fn jsonb_text<T: serde::Serialize>(value: &T, field: &str) -> Result<String, Dom
 ///
 /// 值经 serde 序列化取 snake_case 字符串，与 CHECK 白名单口径永不漂移
 /// （与 [`enum_to_text`] 同一原则）。
-fn encode_required(credentials: &[CredentialType], proofs: &[ProofKind]) -> Result<String, DomainError> {
+fn encode_required(
+    credentials: &[CredentialType],
+    proofs: &[ProofKind],
+) -> Result<String, DomainError> {
     let value = serde_json::json!({
         "credentials": serde_json::to_value(credentials)
             .map_err(|e| DomainError::Storage(format!("required.credentials 序列化失败：{e}")))?,
@@ -71,10 +74,12 @@ fn decode_required(
 }
 
 /// `transitions` 列 → 领域字段；serde 元组数组天然往返（`[["created","produced"],...]`）。
-fn decode_transitions(raw: &str, id: &PolicyId) -> Result<Vec<(LifecycleState, LifecycleState)>, DomainError> {
-    serde_json::from_str(raw).map_err(|e| {
-        DomainError::Storage(format!("库中策略 {id} 的 transitions 列非法：{e}"))
-    })
+fn decode_transitions(
+    raw: &str,
+    id: &PolicyId,
+) -> Result<Vec<(LifecycleState, LifecycleState)>, DomainError> {
+    serde_json::from_str(raw)
+        .map_err(|e| DomainError::Storage(format!("库中策略 {id} 的 transitions 列非法：{e}")))
 }
 
 #[async_trait]
@@ -221,8 +226,7 @@ impl PolicyRepository for PgPolicyRepository {
                 let authority: String = r.get("authority");
                 let required: String = r.get("required");
                 let transitions: String = r.get("transitions");
-                let (required_credentials, required_proofs) =
-                    decode_required(&required, id)?;
+                let (required_credentials, required_proofs) = decode_required(&required, id)?;
                 Ok(Policy {
                     policy_id: PolicyId::new(r.get::<String, _>("policy_id")),
                     version: uint_from_db(r.get("version"), "policy version")?,
@@ -275,8 +279,7 @@ impl PolicyRepository for PgPolicyRepository {
                 let authority: String = r.get("authority");
                 let required: String = r.get("required");
                 let transitions: String = r.get("transitions");
-                let (required_credentials, required_proofs) =
-                    decode_required(&required, &id)?;
+                let (required_credentials, required_proofs) = decode_required(&required, &id)?;
                 Ok(Policy {
                     version: uint_from_db(r.get("version"), "policy version")?,
                     authority: parse_did(&authority)?,
@@ -355,7 +358,9 @@ mod tests {
         let mut tx = pool.begin().await.unwrap();
 
         let domain = sample_domain();
-        repo.save_domain(&mut tx, &domain).await.expect("保存应成功");
+        repo.save_domain(&mut tx, &domain)
+            .await
+            .expect("保存应成功");
         let found = repo
             .find_domain(&mut tx, "vg:domain:cn-food-17")
             .await
@@ -373,7 +378,9 @@ mod tests {
         // 二次保存（upsert）覆盖 jurisdiction
         let mut updated = domain.clone();
         updated.jurisdiction = "EU".into();
-        repo.save_domain(&mut tx, &updated).await.expect("重存应成功");
+        repo.save_domain(&mut tx, &updated)
+            .await
+            .expect("重存应成功");
         assert_eq!(
             repo.find_domain(&mut tx, "vg:domain:cn-food-17")
                 .await
@@ -442,12 +449,14 @@ mod tests {
         let mut v2b = v2.clone();
         v2b.active = false;
         repo.save_policy(&mut tx, &v2b).await.expect("重存应成功");
-        assert!(!repo
-            .find_policy(&mut tx, &PolicyId::new("pol-17x"), 2)
-            .await
-            .unwrap()
-            .unwrap()
-            .active);
+        assert!(
+            !repo
+                .find_policy(&mut tx, &PolicyId::new("pol-17x"), 2)
+                .await
+                .unwrap()
+                .unwrap()
+                .active
+        );
 
         tx.commit().await.unwrap();
     }
@@ -490,7 +499,9 @@ mod tests {
             ],
             "应按 (policy_id, version) 严格有序，且含 inactive 的 a-v1"
         );
-        assert!(got.iter().all(|p| p.jurisdiction == "CN" && p.product_type == "food"));
+        assert!(got
+            .iter()
+            .all(|p| p.jurisdiction == "CN" && p.product_type == "food"));
         // inactive 项确实在列
         assert!(got.iter().any(|p| !p.active));
 

@@ -13,7 +13,7 @@
 pub mod intent;
 
 pub use intent::{
-    can_transition, assert_transition, Intent, IntentAction, IntentStatus, RiskLevel,
+    assert_transition, can_transition, Intent, IntentAction, IntentStatus, RiskLevel,
     ALLOWED_TRANSITIONS,
 };
 
@@ -38,11 +38,8 @@ pub mod ports {
         ///
         /// 防重放的 `(actor, nonce)` 唯一性约束由 PostgreSQL 适配层承担
         /// （数据库层唯一索引），领域端口仅按 id 幂等。
-        async fn insert(
-            &self,
-            ctx: &mut Self::Context,
-            intent: &Intent,
-        ) -> Result<(), DomainError>;
+        async fn insert(&self, ctx: &mut Self::Context, intent: &Intent)
+            -> Result<(), DomainError>;
 
         /// 按 ID 查找；不存在时返回 `Ok(None)`。
         async fn get(
@@ -64,11 +61,7 @@ pub mod ports {
         /// save 不做乐观并发防护（无 version 列），陈旧快照写入会**静默
         /// 覆盖**他人在此期间的推进。另 actor/nonce 不可变，篡改将触发
         /// UNIQUE 约束中止事务。
-        async fn save(
-            &self,
-            ctx: &mut Self::Context,
-            intent: &Intent,
-        ) -> Result<(), DomainError>;
+        async fn save(&self, ctx: &mut Self::Context, intent: &Intent) -> Result<(), DomainError>;
 
         /// 薄写入：仅持久化 status 字段（调用方负责先经 [`Intent::advance`]
         /// 裁决合法边）。
@@ -134,11 +127,7 @@ mod tests {
             Ok(ctx.intents.get(&id.to_string()).cloned())
         }
 
-        async fn save(
-            &self,
-            ctx: &mut Self::Context,
-            intent: &Intent,
-        ) -> Result<(), DomainError> {
+        async fn save(&self, ctx: &mut Self::Context, intent: &Intent) -> Result<(), DomainError> {
             // HashMap 天然 upsert：id 已存在时整体覆盖（保留首建 created_at
             // 属持久化实现的列级职责，内存实现无该列，直接以入参为准）。
             ctx.intents.insert(intent.id.to_string(), intent.clone());
@@ -223,11 +212,9 @@ mod tests {
         );
 
         // get 未找到 → None
-        assert!(
-            block_on(repo.get(&mut ctx, &IntentId::new("nope")))
-                .expect("查询不应报错")
-                .is_none()
-        );
+        assert!(block_on(repo.get(&mut ctx, &IntentId::new("nope")))
+            .expect("查询不应报错")
+            .is_none());
 
         // update_status：更新成功；不存在的 ID → NotFound
         block_on(repo.update_status(&mut ctx, &IntentId::new("i-1"), &IntentStatus::Validated))
@@ -239,7 +226,11 @@ mod tests {
                 .status,
             IntentStatus::Validated
         );
-        match block_on(repo.update_status(&mut ctx, &IntentId::new("nope"), &IntentStatus::Approved)) {
+        match block_on(repo.update_status(
+            &mut ctx,
+            &IntentId::new("nope"),
+            &IntentStatus::Approved,
+        )) {
             Err(DomainError::NotFound) => {}
             other => panic!("更新不存在的 ID 应报 NotFound，实际：{other:?}"),
         }
@@ -277,10 +268,22 @@ mod tests {
             .expect("测试路径推进不应失败");
         block_on(repo.insert(&mut ctx, &confirmed)).expect("插入应成功");
         let pending = block_on(repo.list_pending(&mut ctx)).expect("查询不应报错");
-        assert_eq!(pending.len(), 2, "i-1(Validated) 与 i-4(Created) 非终态；i-3 已 Rejected");
+        assert_eq!(
+            pending.len(),
+            2,
+            "i-1(Validated) 与 i-4(Created) 非终态；i-3 已 Rejected"
+        );
         assert!(pending.iter().all(|i| !i.status.is_terminal()));
-        assert!(pending.contains(&block_on(repo.get(&mut ctx, &IntentId::new("i-1"))).unwrap().unwrap()));
-        assert!(pending.contains(&block_on(repo.get(&mut ctx, &IntentId::new("i-4"))).unwrap().unwrap()));
+        assert!(pending.contains(
+            &block_on(repo.get(&mut ctx, &IntentId::new("i-1")))
+                .unwrap()
+                .unwrap()
+        ));
+        assert!(pending.contains(
+            &block_on(repo.get(&mut ctx, &IntentId::new("i-4")))
+                .unwrap()
+                .unwrap()
+        ));
     }
 
     /// 编译期哨兵（与 policy / identity 同款）：`R::Context: Send`

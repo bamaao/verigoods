@@ -28,12 +28,12 @@ pub mod stealth;
 pub use ecies::{decrypt_with, encrypt_to};
 pub use keypair::{pubkey_to_did, KeyPair};
 pub use poseidon::{poseidon_note_commitment, to_field_le, PoseidonNoteHasher};
-/// 领域层 32 字节哈希类型（承诺输出对账口径，供 vg-infra-zk 复用）。
-pub use vg_domain::shared::Hash32;
 pub use stealth::{
     derive_one_time, derive_one_time_with_r, scan_and_unlock, unlock_spend_key, SharedSecretBytes,
     StealthMetaAddressView, UnlockInfo,
 };
+/// 领域层 32 字节哈希类型（承诺输出对账口径，供 vg-infra-zk 复用）。
+pub use vg_domain::shared::Hash32;
 
 /// 密码学原语统一错误。
 ///

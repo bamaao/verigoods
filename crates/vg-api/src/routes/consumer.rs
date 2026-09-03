@@ -24,7 +24,10 @@ use crate::state::SharedState;
 /// owner DID 掩码：`DID-` + `did:vg:` 后缀前 8 位（大写）。
 pub(crate) fn mask_did(did: &vg_domain::shared::Did) -> String {
     let suffix = did.as_str().strip_prefix("did:vg:").unwrap_or(did.as_str());
-    format!("DID-{}", suffix.chars().take(8).collect::<String>().to_uppercase())
+    format!(
+        "DID-{}",
+        suffix.chars().take(8).collect::<String>().to_uppercase()
+    )
 }
 
 /// 消费者聚合视图。
@@ -34,7 +37,9 @@ pub async fn view(
 ) -> Result<Json<Value>, ApiError> {
     let subject = parse_subject_param(&subject)?;
     let vg_domain::shared::SubjectRef::Batch(batch_id) = &subject else {
-        return Err(ApiError::bad_request("消费者视图 Phase1 仅支持批次（batch:<id>）"));
+        return Err(ApiError::bad_request(
+            "消费者视图 Phase1 仅支持批次（batch:<id>）",
+        ));
     };
 
     let mut tx = begin_tx(&state.pool).await?;
@@ -45,12 +50,7 @@ pub async fn view(
         .find_batch(&mut tx, batch_id)
         .await?
         .ok_or(DomainError::NotFound)?;
-    let ownership = state
-        .engine
-        .deps()
-        .ownership
-        .get(&mut tx, &subject)
-        .await?;
+    let ownership = state.engine.deps().ownership.get(&mut tx, &subject).await?;
     let state_str = match state
         .engine
         .deps()

@@ -5,8 +5,8 @@
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{PromptMessage, Role};
-use rmcp::{prompt, prompt_router};
 use rmcp::ErrorData;
+use rmcp::{prompt, prompt_router};
 use serde::Deserialize;
 
 use crate::mcp::McpServer;
@@ -84,7 +84,10 @@ fn user(text: String) -> Vec<PromptMessage> {
 #[prompt_router(vis = "pub(crate)")]
 impl McpServer {
     /// 批次溯源报告。
-    #[prompt(name = "batch_trace_report", description = "生成批次全链路溯源报告框架")]
+    #[prompt(
+        name = "batch_trace_report",
+        description = "生成批次全链路溯源报告框架"
+    )]
     pub async fn prompt_batch_trace_report(
         &self,
         Parameters(a): Parameters<SubjectPromptArgs>,
@@ -101,7 +104,10 @@ impl McpServer {
     }
 
     /// 召回调查指引。
-    #[prompt(name = "recall_investigation", description = "召回调查的取证与处置指引")]
+    #[prompt(
+        name = "recall_investigation",
+        description = "召回调查的取证与处置指引"
+    )]
     pub async fn prompt_recall_investigation(
         &self,
         Parameters(a): Parameters<SubjectReasonArgs>,
@@ -154,7 +160,10 @@ impl McpServer {
     }
 
     /// 消费者验真指南。
-    #[prompt(name = "consumer_verify", description = "消费者验真步骤指南（免签只读口径）")]
+    #[prompt(
+        name = "consumer_verify",
+        description = "消费者验真步骤指南（免签只读口径）"
+    )]
     pub async fn prompt_consumer_verify(
         &self,
         Parameters(a): Parameters<VerifyArgs>,
@@ -171,7 +180,10 @@ impl McpServer {
     }
 
     /// 监管披露申请。
-    #[prompt(name = "regulatory_disclosure", description = "向监管方发起数据披露申请的文案模板")]
+    #[prompt(
+        name = "regulatory_disclosure",
+        description = "向监管方发起数据披露申请的文案模板"
+    )]
     pub async fn prompt_regulatory_disclosure(
         &self,
         Parameters(a): Parameters<DisclosureArgs>,

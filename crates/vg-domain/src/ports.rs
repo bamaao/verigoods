@@ -234,7 +234,10 @@ mod tests {
     fn field_element_from_u64_roundtrip_and_serde() {
         let f = FieldElement::from_u64(0x0102030405060708);
         // 低 8 字节小端，高位为零
-        assert_eq!(&f.as_bytes()[..8], &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]);
+        assert_eq!(
+            &f.as_bytes()[..8],
+            &[0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01]
+        );
         assert!(f.as_bytes()[8..].iter().all(|&b| b == 0));
 
         // serde hex 往返
@@ -249,7 +252,10 @@ mod tests {
         assert!(serde_json::from_str::<FieldElement>("\"zz\"").is_err());
         assert!(serde_json::from_str::<FieldElement>(&format!("\"{}\"", "ab".repeat(31))).is_err());
         // 0 也合法
-        assert_eq!(FieldElement::from_u64(0), FieldElement::from_bytes([0u8; 32]));
+        assert_eq!(
+            FieldElement::from_u64(0),
+            FieldElement::from_bytes([0u8; 32])
+        );
     }
 
     // ---- LedgerItem serde ----
@@ -466,7 +472,13 @@ mod tests {
             version: 1,
             public_inputs: vec![FieldElement::from_u64(5)],
         };
-        let bundle = block_on(prover.prove(&spec, &Witness { secrets: Vec::new() })).unwrap();
+        let bundle = block_on(prover.prove(
+            &spec,
+            &Witness {
+                secrets: Vec::new(),
+            },
+        ))
+        .unwrap();
         assert_eq!(bundle.circuit_id, "note_opening");
         assert!(prover.verify(&bundle).unwrap());
     }

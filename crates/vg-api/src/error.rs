@@ -117,11 +117,7 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.status(),
-            Json(self.to_error_json()),
-        )
-            .into_response()
+        (self.status(), Json(self.to_error_json())).into_response()
     }
 }
 
@@ -141,7 +137,10 @@ mod tests {
                 DomainError::CredentialInvalid("x".into()),
                 StatusCode::BAD_REQUEST,
             ),
-            (DomainError::Unauthorized("x".into()), StatusCode::UNAUTHORIZED),
+            (
+                DomainError::Unauthorized("x".into()),
+                StatusCode::UNAUTHORIZED,
+            ),
             (
                 DomainError::PolicyViolated("x".into()),
                 StatusCode::FORBIDDEN,
@@ -208,7 +207,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["code"], "storage");
         assert_eq!(v["message"], "内部存储错误");
-        assert!(!text.contains("db.internal"), "原始消息子串不得出现在响应体");
+        assert!(
+            !text.contains("db.internal"),
+            "原始消息子串不得出现在响应体"
+        );
         assert!(!text.contains("连接失败"), "原始消息子串不得出现在响应体");
     }
 

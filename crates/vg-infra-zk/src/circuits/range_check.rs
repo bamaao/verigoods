@@ -467,7 +467,8 @@ where
         // 10b. 位区外位值冻结为相等（xb = bb）：使比较链 10 在位区外
         // 自动冻结（d = 0），同时杜绝在填充行伪造「胜负位」
         builder.assert_zero(
-            (one.clone() - prep_local[PP_BZ].into()) * (local[XB_COL].into() - local[BB_COL].into()),
+            (one.clone() - prep_local[PP_BZ].into())
+                * (local[XB_COL].into() - local[BB_COL].into()),
         );
 
         // 5/7. 计数器与标志位布尔（所有行）
@@ -503,12 +504,12 @@ where
         for j in 0..NUM_CHUNKS {
             let e_j = prep_local[PP_E + j];
             // x 侧：区 j 累积末值 == chunk 列（区 0/1/2 ↔ 高/中/低）
-            builder.assert_zero(
-                e_j.into() * (local[XA0_COL + j].into() - local[XC0_COL + j].into()),
-            );
-            // B 侧：区 j 累积末值 == publics chunk（高/中/低 ↔ [2]/[1]/[0]）
             builder
-                .assert_zero(e_j.into() * (local[BA0_COL + j].into() - publics[NUM_CHUNKS - 1 - j].into()));
+                .assert_zero(e_j.into() * (local[XA0_COL + j].into() - local[XC0_COL + j].into()));
+            // B 侧：区 j 累积末值 == publics chunk（高/中/低 ↔ [2]/[1]/[0]）
+            builder.assert_zero(
+                e_j.into() * (local[BA0_COL + j].into() - publics[NUM_CHUNKS - 1 - j].into()),
+            );
         }
         // 终局（行 89 = 区 2 末行）：lt + eq = 1
         builder.assert_zero(
@@ -844,13 +845,29 @@ fn build_witness(x: u64, salt: &[u8; 16], bound: u64) -> Witness {
         values[base + XB_COL] = KoalaBear::from_int(if r < BIT_ROWS { xb_bits[r] } else { 0 });
         values[base + BB_COL] = KoalaBear::from_int(if r < BIT_ROWS { bb_bits[r] } else { 0 });
         for j in 0..NUM_CHUNKS {
-            let xa_j = if r < BIT_ROWS { xaccs[r][j] } else { KoalaBear::from_int(0u32) };
-            let ba_j = if r < BIT_ROWS { baccs[r][j] } else { KoalaBear::from_int(0u32) };
+            let xa_j = if r < BIT_ROWS {
+                xaccs[r][j]
+            } else {
+                KoalaBear::from_int(0u32)
+            };
+            let ba_j = if r < BIT_ROWS {
+                baccs[r][j]
+            } else {
+                KoalaBear::from_int(0u32)
+            };
             values[base + XA0_COL + j] = xa_j;
             values[base + BA0_COL + j] = ba_j;
         }
-        let eq_r = if r < BIT_ROWS { eqs[r] } else { eqs[BIT_ROWS - 1] };
-        let lt_r = if r < BIT_ROWS { lts[r] } else { lts[BIT_ROWS - 1] };
+        let eq_r = if r < BIT_ROWS {
+            eqs[r]
+        } else {
+            eqs[BIT_ROWS - 1]
+        };
+        let lt_r = if r < BIT_ROWS {
+            lts[r]
+        } else {
+            lts[BIT_ROWS - 1]
+        };
         values[base + EQ_COL] = eq_r;
         values[base + LT_COL] = lt_r;
         // 常量 chunk / salt 列（全行相同）
@@ -894,11 +911,7 @@ pub struct RangeProofOutput {
 /// 语句：90 位（3 chunk × 30 位）分解精确重建 x ∧ 整数 x ≤ B ∧
 /// C = Commit(x‖salt)。x > bound 时返回 [`ZkError::InvalidWitness`]
 /// （见证必违反约束，电路外前置拦截不 panic）。
-pub fn prove_range_check(
-    x: u64,
-    salt: &[u8; 16],
-    bound: u64,
-) -> Result<RangeProofOutput, ZkError> {
+pub fn prove_range_check(x: u64, salt: &[u8; 16], bound: u64) -> Result<RangeProofOutput, ZkError> {
     if x > bound {
         return Err(ZkError::InvalidWitness(format!(
             "x ({x}) 超过上界 bound ({bound})，语句为假"
@@ -965,8 +978,8 @@ mod tests {
     /// 黄金参数：x、salt、B（bound）。
     const GOLDEN_X: u64 = 0x1FFDEADBEAF;
     const GOLDEN_SALT: [u8; 16] = [
-        0x33, 0x44, 0x55, 0x66, 0xC0, 0xFF, 0xEE, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
-        0x66, 0x77,
+        0x33, 0x44, 0x55, 0x66, 0xC0, 0xFF, 0xEE, 0x00, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+        0x77,
     ];
     const GOLDEN_BOUND: u64 = 0xFFFF_FFFF_FFFF;
 
@@ -996,8 +1009,8 @@ mod tests {
         );
 
         let start = Instant::now();
-        let output = prove_range_check(GOLDEN_X, &GOLDEN_SALT, GOLDEN_BOUND)
-            .expect("黄金见证 prove 应成功");
+        let output =
+            prove_range_check(GOLDEN_X, &GOLDEN_SALT, GOLDEN_BOUND).expect("黄金见证 prove 应成功");
         let prove_secs = start.elapsed().as_secs_f64();
 
         let start = Instant::now();
@@ -1019,7 +1032,10 @@ mod tests {
         let bound: u64 = 1 << 40;
         for x in [0u64, 1, bound - 1, bound] {
             let output = prove_range_check(x, &salt, bound).expect("x ≤ B 应 prove 成功");
-            assert!(verify_range_check(&output), "x = {x} ≤ B 的证明应 verify true");
+            assert!(
+                verify_range_check(&output),
+                "x = {x} ≤ B 的证明应 verify true"
+            );
         }
         // B = u64::MAX（三 chunk 全 0x3FFFFFFF）：x = B、x = B−1 通过
         let output = prove_range_check(u64::MAX, &salt, u64::MAX).expect("x = B = u64::MAX 应成功");

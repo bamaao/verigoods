@@ -189,11 +189,7 @@ impl PolicyEngine {
         let missing_proofs: Vec<&str> = policy
             .required_proofs
             .iter()
-            .filter(|kind| {
-                !proofs
-                    .iter()
-                    .any(|p| p.kind == **kind && p.verified)
-            })
+            .filter(|kind| !proofs.iter().any(|p| p.kind == **kind && p.verified))
             .map(|kind| kind.as_str())
             .collect();
         if !missing_proofs.is_empty() {
@@ -233,7 +229,10 @@ mod tests {
         }
     }
 
-    fn sample_cred(ctype: CredentialType, expires_at: Option<DateTime<Utc>>) -> VerifiableCredential {
+    fn sample_cred(
+        ctype: CredentialType,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> VerifiableCredential {
         VerifiableCredential::new(
             crate::shared::CredentialId::generate(),
             Did::parse("did:vg:user:reg-001").unwrap(),
@@ -278,18 +277,9 @@ mod tests {
     #[test]
     fn allows_transition_hits_and_misses() {
         let policy = sample_policy();
-        assert!(policy.allows_transition(
-            LifecycleState::InWarehouse,
-            LifecycleState::InTransit
-        ));
-        assert!(!policy.allows_transition(
-            LifecycleState::InWarehouse,
-            LifecycleState::Sold
-        ));
-        assert!(!policy.allows_transition(
-            LifecycleState::Created,
-            LifecycleState::InTransit
-        ));
+        assert!(policy.allows_transition(LifecycleState::InWarehouse, LifecycleState::InTransit));
+        assert!(!policy.allows_transition(LifecycleState::InWarehouse, LifecycleState::Sold));
+        assert!(!policy.allows_transition(LifecycleState::Created, LifecycleState::InTransit));
     }
 
     // ---- serde ----

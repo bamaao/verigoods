@@ -299,7 +299,8 @@ impl IntentEngine {
             intent.advance(IntentStatus::Expired)?;
             let resource = deny_resource(&intent);
             self.deps.intents.save(&mut tx, &intent).await?;
-            self.audit(&mut tx, &intent, &resource, "deny", now, &[], None).await?;
+            self.audit(&mut tx, &intent, &resource, "deny", now, &[], None)
+                .await?;
             return self.commit(tx, result_of(&intent, false)).await;
         }
 
@@ -342,7 +343,8 @@ impl IntentEngine {
             intent.advance(IntentStatus::Expired)?;
             let resource = deny_resource(&intent);
             self.deps.intents.save(&mut tx, &intent).await?;
-            self.audit(&mut tx, &intent, &resource, "deny", now, &[], None).await?;
+            self.audit(&mut tx, &intent, &resource, "deny", now, &[], None)
+                .await?;
             return self.commit(tx, result_of(&intent, false)).await;
         }
 
@@ -515,8 +517,16 @@ impl IntentEngine {
                 intent.advance(IntentStatus::Submitted)?;
                 intent.confirm(&result_ref)?;
                 self.deps.intents.save(&mut tx, &intent).await?;
-                self.audit(&mut tx, &intent, &resource, "allow", now, &policy, proof_id.as_ref())
-                    .await?;
+                self.audit(
+                    &mut tx,
+                    &intent,
+                    &resource,
+                    "allow",
+                    now,
+                    &policy,
+                    proof_id.as_ref(),
+                )
+                .await?;
                 self.commit(tx, result_of(&intent, false)).await
             }
         }
@@ -535,7 +545,8 @@ impl IntentEngine {
         let resource = deny_resource(&intent);
         intent.reject(reason)?;
         self.deps.intents.save(&mut tx, &intent).await?;
-        self.audit(&mut tx, &intent, &resource, "deny", now, &[], None).await?;
+        self.audit(&mut tx, &intent, &resource, "deny", now, &[], None)
+            .await?;
         self.commit(tx, result_of(&intent, false)).await
     }
 
@@ -1159,10 +1170,7 @@ mod tests {
         assert!(result.awaiting_approval);
 
         // 错误角色：Err(Unauthorized)，非业务 Rejected 结果
-        match engine
-            .approve(&IntentId::new("it-l3w-1"), &outsider)
-            .await
-        {
+        match engine.approve(&IntentId::new("it-l3w-1"), &outsider).await {
             Err(AppError::Domain(DomainError::Unauthorized(msg))) => {
                 assert!(msg.contains("角色不符"), "实际消息：{msg}");
             }
@@ -1423,10 +1431,7 @@ mod tests {
         intent.advance(IntentStatus::Validated).unwrap();
         intent.advance(IntentStatus::Authorized).unwrap();
         let mut tx = pool.begin().await.unwrap();
-        PgIntentRepository
-            .insert(&mut tx, &intent)
-            .await
-            .unwrap();
+        PgIntentRepository.insert(&mut tx, &intent).await.unwrap();
         tx.commit().await.unwrap();
 
         match engine.approve(&IntentId::new("it-ap-2"), &regulator).await {
@@ -1509,7 +1514,14 @@ mod tests {
     #[test]
     fn awaiting_status_covers_all_statuses() {
         use IntentStatus::*;
-        for s in [Created, Validated, Authorized, PolicyChecked, ProofRequired, Proved] {
+        for s in [
+            Created,
+            Validated,
+            Authorized,
+            PolicyChecked,
+            ProofRequired,
+            Proved,
+        ] {
             assert!(awaiting_status(s), "{s:?} 应视为门内");
         }
         for s in [Approved, Submitted, Confirmed, Rejected, Expired, Cancelled] {

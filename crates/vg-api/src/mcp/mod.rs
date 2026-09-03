@@ -54,9 +54,9 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use vg_domain::shared::{Did, DomainError};
 
-use crate::state::SharedState;
 #[cfg(not(feature = "mcp-mock-auth"))]
 use crate::middleware::auth::AuthedDid;
+use crate::state::SharedState;
 
 /// MCP 服务端句柄：持有与 REST 路由同一份共享状态。
 #[derive(Clone)]
@@ -85,13 +85,14 @@ impl McpServer {
 /// 生产实现见模块 doc（`http::request::Parts` → `AuthedDid`）；
 /// `mcp-mock-auth` 下直通固定测试 DID。
 pub(crate) fn actor_from_context(
-    #[cfg_attr(feature = "mcp-mock-auth", allow(unused_variables))] ctx: &rmcp::service::RequestContext<RoleServer>,
+    #[cfg_attr(feature = "mcp-mock-auth", allow(unused_variables))]
+    ctx: &rmcp::service::RequestContext<RoleServer>,
 ) -> Result<Did, ErrorData> {
     #[cfg(feature = "mcp-mock-auth")]
     {
         // ⚠ 仅测试：无 HTTP 层的 in-process 客户端直通固定 DID。
-        let did = Did::parse(&format!("did:vg:{}", "22".repeat(32)))
-            .expect("固定测试 DID 语法合法");
+        let did =
+            Did::parse(&format!("did:vg:{}", "22".repeat(32))).expect("固定测试 DID 语法合法");
         Ok(did)
     }
     #[cfg(not(feature = "mcp-mock-auth"))]
@@ -110,10 +111,7 @@ pub(crate) fn actor_from_context(
             .get::<AuthedDid>()
             .map(|AuthedDid(did)| did.clone())
             .ok_or_else(|| {
-                ErrorData::internal_error(
-                    "MCP 请求未携带 VG-SIG 鉴权身份（AuthedDid 缺失）",
-                    None,
-                )
+                ErrorData::internal_error("MCP 请求未携带 VG-SIG 鉴权身份（AuthedDid 缺失）", None)
             })
     }
 }
@@ -137,7 +135,9 @@ pub(crate) fn internal_err(e: DomainError) -> ErrorData {
 macro_rules! commit {
     ($tx:expr) => {
         if let Err(e) = $tx.commit().await {
-            return Err(internal_err(DomainError::Storage(format!("事务提交失败：{e}"))));
+            return Err(internal_err(DomainError::Storage(format!(
+                "事务提交失败：{e}"
+            ))));
         }
     };
 }

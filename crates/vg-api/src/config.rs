@@ -34,11 +34,9 @@ impl Config {
         // .env 缺失时 dotenv() 返回 Err，属正常情况，忽略
         let _ = dotenvy::dotenv();
 
-        let database_url = std::env::var("DATABASE_URL").map_err(|_| {
-            ConfigError("缺少必填环境变量 DATABASE_URL（可写入 .env）".into())
-        })?;
-        let bind_addr =
-            std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
+        let database_url = std::env::var("DATABASE_URL")
+            .map_err(|_| ConfigError("缺少必填环境变量 DATABASE_URL（可写入 .env）".into()))?;
+        let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_owned());
         let prover = match std::env::var("VG_PROVER").unwrap_or_else(|_| "plonky".into()) {
             v if v.eq_ignore_ascii_case("plonky") => ProverKind::Plonky,
             v if v.eq_ignore_ascii_case("transparent") => ProverKind::Transparent,

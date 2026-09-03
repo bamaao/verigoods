@@ -35,12 +35,11 @@ pub struct ScannedNote {
 fn parse_secret(hex_str: &str, what: &str) -> Result<SecretKey, AppError> {
     let bytes = hex::decode(hex_str.trim_start_matches("0x"))
         .map_err(|e| DomainError::InvalidInput(format!("{what} 非法 hex：{e}")))?;
-    let arr: [u8; 32] = bytes.try_into().map_err(|_| {
-        DomainError::InvalidInput(format!("{what} 必须为 32 字节 hex"))
-    })?;
-    SecretKey::from_slice(&arr).map_err(|e| {
-        AppError::Domain(DomainError::InvalidInput(format!("{what} 非法私钥：{e}")))
-    })
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| DomainError::InvalidInput(format!("{what} 必须为 32 字节 hex")))?;
+    SecretKey::from_slice(&arr)
+        .map_err(|e| AppError::Domain(DomainError::InvalidInput(format!("{what} 非法私钥：{e}"))))
 }
 
 /// 遍历全部未识别 notes，返回属于该接收方（view 私钥 + spend 公钥）的
@@ -54,7 +53,9 @@ pub async fn scan_notes(
     let pub_bytes = hex::decode(spend_pub_hex.trim_start_matches("0x"))
         .map_err(|e| DomainError::InvalidInput(format!("spend_pub 非法 hex：{e}")))?;
     let spend_pub = PublicKey::from_sec1_bytes(&pub_bytes).map_err(|e| {
-        AppError::Domain(DomainError::InvalidInput(format!("spend_pub 非法公钥：{e}")))
+        AppError::Domain(DomainError::InvalidInput(format!(
+            "spend_pub 非法公钥：{e}"
+        )))
     })?;
 
     let rows = sqlx::query(
@@ -119,10 +120,7 @@ pub async fn scan_notes(
 /// 强制点在 Task 23 API 中间层（view 私钥持有证明 + `data_access_grants`
 /// 校验的双因子，见 [`crate::services::validium::grant_data_access`]）。
 /// 直接调用本函数者须自证已获授权。
-pub fn regulator_decrypt(
-    extra: &[u8],
-    view_priv_hex: &str,
-) -> Result<serde_json::Value, AppError> {
+pub fn regulator_decrypt(extra: &[u8], view_priv_hex: &str) -> Result<serde_json::Value, AppError> {
     let view_priv = parse_secret(view_priv_hex, "view_priv")?;
     let plain = crypto::ecies::decrypt_with(&view_priv, extra)
         .map_err(|e| DomainError::InvalidInput(format!("ExtraData 解密失败：{e}")))?;

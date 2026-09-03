@@ -18,10 +18,10 @@ use rmcp::{tool, tool_router};
 use rmcp::{ErrorData, RoleServer};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use vg_domain::credential::VerifiableCredential;
 use vg_domain::intent::IntentAction;
 use vg_domain::ownership::{CustodyState, OwnershipState};
 use vg_domain::shared::{Did, DomainError, SubjectRef};
-use vg_domain::credential::VerifiableCredential;
 
 use crate::error::ApiError;
 use crate::mcp::{actor_from_context, internal_err, McpServer};
@@ -63,9 +63,9 @@ fn subject_value(s: &SubjectRef) -> Value {
 fn on_behalf_of(raw: &Option<String>) -> Result<Option<Did>, ErrorData> {
     match raw {
         None => Ok(None),
-        Some(s) => Did::parse(s).map(Some).map_err(|e| {
-            ErrorData::invalid_params(format!("on_behalf_of 非法 DID：{e}"), None)
-        }),
+        Some(s) => Did::parse(s)
+            .map(Some)
+            .map_err(|e| ErrorData::invalid_params(format!("on_behalf_of 非法 DID：{e}"), None)),
     }
 }
 
@@ -79,15 +79,9 @@ async fn run_tool(
     payload: Value,
 ) -> Result<CallToolResult, ErrorData> {
     let actor = actor_from_context(ctx)?;
-    let result = crate::routes::run_intent(
-        &server.state.engine,
-        actor,
-        ob,
-        action,
-        intent_id,
-        payload,
-    )
-    .await;
+    let result =
+        crate::routes::run_intent(&server.state.engine, actor, ob, action, intent_id, payload)
+            .await;
     match result {
         Ok(r) => ok_json(&r.0),
         Err(e) => err_json(e),
@@ -340,7 +334,15 @@ impl McpServer {
             "unit": p.unit,
             "target_state": p.target_state,
         });
-        run_tool(self, &ctx, IntentAction::CreateBatch, p.intent_id(), on_behalf_of(p.on_behalf_of())?, payload).await
+        run_tool(
+            self,
+            &ctx,
+            IntentAction::CreateBatch,
+            p.intent_id(),
+            on_behalf_of(p.on_behalf_of())?,
+            payload,
+        )
+        .await
     }
 
     /// 拆分批次：父批数量按 children 分配到子批。
@@ -360,7 +362,15 @@ impl McpServer {
             "subject": subject_value(&subject),
             "children": children,
         });
-        run_tool(self, &ctx, IntentAction::SplitBatch, p.intent_id(), on_behalf_of(p.on_behalf_of())?, payload).await
+        run_tool(
+            self,
+            &ctx,
+            IntentAction::SplitBatch,
+            p.intent_id(),
+            on_behalf_of(p.on_behalf_of())?,
+            payload,
+        )
+        .await
     }
 
     /// 合并批次：多父批合并为新批（new_batch_id 为业务产物）。
@@ -383,7 +393,15 @@ impl McpServer {
             "children": p.children,
             "new_batch_id": p.new_batch_id,
         });
-        run_tool(self, &ctx, IntentAction::MergeBatch, p.intent_id(), on_behalf_of(p.on_behalf_of())?, payload).await
+        run_tool(
+            self,
+            &ctx,
+            IntentAction::MergeBatch,
+            p.intent_id(),
+            on_behalf_of(p.on_behalf_of())?,
+            payload,
+        )
+        .await
     }
 
     /// 建单品：authenticity_commitment 为 32 字节 hex。
@@ -404,7 +422,15 @@ impl McpServer {
             "authenticity_commitment": p.authenticity_commitment,
             "manufacturer": p.manufacturer,
         });
-        run_tool(self, &ctx, IntentAction::CreateItem, p.intent_id(), on_behalf_of(p.on_behalf_of())?, payload).await
+        run_tool(
+            self,
+            &ctx,
+            IntentAction::CreateItem,
+            p.intent_id(),
+            on_behalf_of(p.on_behalf_of())?,
+            payload,
+        )
+        .await
     }
 
     /// 批次聚合视图（同 REST `GET /api/v1/batches/{id}`）。
@@ -416,18 +442,17 @@ impl McpServer {
         let id = vg_domain::shared::BatchId::new(p.id);
         let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
         // 聚合组装走 REST 同款唯一口径（一处化）
-        let value = match crate::routes::commodity::batch_aggregate(
-            self.state.engine.deps(),
-            &mut tx,
-            &id,
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => return err_json(ApiError::from(e)),
-        };
+        let value =
+            match crate::routes::commodity::batch_aggregate(self.state.engine.deps(), &mut tx, &id)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => return err_json(ApiError::from(e)),
+            };
         if let Err(e) = tx.commit().await {
-            return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
+            return err_json(ApiError::from(DomainError::Storage(format!(
+                "事务提交失败：{e}"
+            ))));
         }
         ok_json(&value)
     }
@@ -451,7 +476,9 @@ impl McpServer {
             .await
             .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
-            return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
+            return err_json(ApiError::from(DomainError::Storage(format!(
+                "事务提交失败：{e}"
+            ))));
         }
         ok_json(&ownership)
     }
@@ -473,7 +500,9 @@ impl McpServer {
             .await
             .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
-            return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
+            return err_json(ApiError::from(DomainError::Storage(format!(
+                "事务提交失败：{e}"
+            ))));
         }
         ok_json(&custody)
     }
@@ -488,9 +517,10 @@ impl McpServer {
         Parameters(p): Parameters<TransferProductParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let subject = subject_ref(&p.subject_type, &p.subject_id)?;
-        let custody = p.custody.as_ref().map(|c| {
-            json!({ "to": c.to, "reason": c.reason })
-        });
+        let custody = p
+            .custody
+            .as_ref()
+            .map(|c| json!({ "to": c.to, "reason": c.reason }));
         let payload = json!({
             "subject": subject_value(&subject),
             "to": p.to,
@@ -498,7 +528,15 @@ impl McpServer {
             "lifecycle_to": p.lifecycle_to,
             "custody": custody,
         });
-        run_tool(self, &ctx, IntentAction::TransferProduct, p.intent_id(), on_behalf_of(p.on_behalf_of())?, payload).await
+        run_tool(
+            self,
+            &ctx,
+            IntentAction::TransferProduct,
+            p.intent_id(),
+            on_behalf_of(p.on_behalf_of())?,
+            payload,
+        )
+        .await
     }
 
     /// 保管更新（不触碰所有权）。
@@ -515,7 +553,15 @@ impl McpServer {
             "reason": p.reason,
             "lifecycle_to": p.lifecycle_to,
         });
-        run_tool(self, &ctx, IntentAction::UpdateCustody, p.intent_id(), on_behalf_of(p.on_behalf_of())?, payload).await
+        run_tool(
+            self,
+            &ctx,
+            IntentAction::UpdateCustody,
+            p.intent_id(),
+            on_behalf_of(p.on_behalf_of())?,
+            payload,
+        )
+        .await
     }
 
     /// 意图详情（脱敏同 REST：shielded 花费密钥擦除）。
@@ -534,7 +580,9 @@ impl McpServer {
             .await
             .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
-            return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
+            return err_json(ApiError::from(DomainError::Storage(format!(
+                "事务提交失败：{e}"
+            ))));
         }
         match intent {
             Some(i) => ok_json(&crate::routes::intent::sanitize_intent(i)),
@@ -578,7 +626,9 @@ impl McpServer {
             .await
             .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
-            return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
+            return err_json(ApiError::from(DomainError::Storage(format!(
+                "事务提交失败：{e}"
+            ))));
         }
         ok_json(&records)
     }
@@ -602,7 +652,15 @@ impl McpServer {
             "credential_id": p.credential_id,
             "domain_id": p.domain_id,
         });
-        run_tool(self, &ctx, IntentAction::IssueCredential, p.intent_id(), on_behalf_of(p.on_behalf_of())?, payload).await
+        run_tool(
+            self,
+            &ctx,
+            IntentAction::IssueCredential,
+            p.intent_id(),
+            on_behalf_of(p.on_behalf_of())?,
+            payload,
+        )
+        .await
     }
 
     /// 撤销凭证（issuer-only）。
@@ -618,7 +676,15 @@ impl McpServer {
             "credential_id": p.credential_id,
             "reason": p.reason,
         });
-        run_tool(self, &ctx, IntentAction::RevokeCredential, p.intent_id(), on_behalf_of(p.on_behalf_of())?, payload).await
+        run_tool(
+            self,
+            &ctx,
+            IntentAction::RevokeCredential,
+            p.intent_id(),
+            on_behalf_of(p.on_behalf_of())?,
+            payload,
+        )
+        .await
     }
 
     /// 按主体列出凭证。
@@ -639,7 +705,9 @@ impl McpServer {
             .await
             .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
-            return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
+            return err_json(ApiError::from(DomainError::Storage(format!(
+                "事务提交失败：{e}"
+            ))));
         }
         ok_json(&vcs)
     }
@@ -734,7 +802,9 @@ impl McpServer {
             .await
             .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
-            return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
+            return err_json(ApiError::from(DomainError::Storage(format!(
+                "事务提交失败：{e}"
+            ))));
         }
         match record {
             Some(r) => ok_json(&json!({

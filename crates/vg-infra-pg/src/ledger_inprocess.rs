@@ -132,12 +132,13 @@ impl InProcessLedger {
         chained[32..].copy_from_slice(ref_hash.as_bytes());
         let new_root = Hash32::keccak(&chained);
 
-        let state_row =
-            sqlx::query("UPDATE ledger_state SET root = $1, seq = seq + 1 WHERE id = 1 RETURNING seq")
-                .bind(new_root.as_bytes().as_slice())
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(crate::storage)?;
+        let state_row = sqlx::query(
+            "UPDATE ledger_state SET root = $1, seq = seq + 1 WHERE id = 1 RETURNING seq",
+        )
+        .bind(new_root.as_bytes().as_slice())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(crate::storage)?;
         let seq: i64 = state_row.get("seq");
 
         // 回填 tx_ref（bigserial PK 定位；seq 为 bigint，恒非负，无符号还原）
@@ -250,9 +251,7 @@ mod tests {
     use chrono::{DateTime, Utc};
     use vg_domain::credential::CredStatus;
     use vg_domain::lifecycle::LifecycleState;
-    use vg_domain::shared::{
-        AssetId, BatchId, CredentialId, Did, PolicyId, SubjectRef,
-    };
+    use vg_domain::shared::{AssetId, BatchId, CredentialId, Did, PolicyId, SubjectRef};
 
     fn did(s: &str) -> Did {
         Did::parse(s).unwrap()
@@ -329,7 +328,10 @@ mod tests {
         let c1 = Hash32::keccak(b"c1");
         let absent = Hash32::keccak(b"absent");
 
-        assert!(!ledger.is_commitment_present(&c1).await.unwrap(), "未锚定应 false");
+        assert!(
+            !ledger.is_commitment_present(&c1).await.unwrap(),
+            "未锚定应 false"
+        );
         let r1 = ledger.anchor(LedgerItem::Commitment(c1)).await.unwrap();
         assert!(ledger.is_commitment_present(&c1).await.unwrap());
         assert!(!ledger.is_commitment_present(&absent).await.unwrap());
@@ -345,7 +347,11 @@ mod tests {
     #[sqlx::test]
     async fn root_advances_monotonically_and_matches_hand_chain(pool: sqlx::PgPool) {
         let ledger = InProcessLedger::new(pool);
-        assert_eq!(ledger.current_root().await.unwrap(), Hash32::ZERO, "初始为零根");
+        assert_eq!(
+            ledger.current_root().await.unwrap(),
+            Hash32::ZERO,
+            "初始为零根"
+        );
 
         let c1 = Hash32::keccak(b"commit-1");
         let n1 = Hash32::keccak(b"null-1");
@@ -411,7 +417,10 @@ mod tests {
         for (i, row) in rows.iter().enumerate() {
             let payload: String = row.get("payload");
             let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
-            assert_eq!(v["batch_ref"], serde_json::json!(format!("batch-{}", i + 1)));
+            assert_eq!(
+                v["batch_ref"],
+                serde_json::json!(format!("batch-{}", i + 1))
+            );
         }
     }
 
@@ -428,12 +437,10 @@ mod tests {
 
         // 抽查 1：nullifier 的 ref_hash = h 本身
         let h = Hash32::keccak(b"x");
-        let row = sqlx::query(
-            "SELECT ref_hash FROM ledger_anchors WHERE kind = 'nullifier'",
-        )
-        .fetch_one(&ledger.pool)
-        .await
-        .unwrap();
+        let row = sqlx::query("SELECT ref_hash FROM ledger_anchors WHERE kind = 'nullifier'")
+            .fetch_one(&ledger.pool)
+            .await
+            .unwrap();
         let rh: Vec<u8> = row.get("ref_hash");
         assert_eq!(rh.as_slice(), h.as_bytes());
 

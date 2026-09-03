@@ -44,9 +44,7 @@ impl PgOutbox {
         let event_type = value
             .get("event_type")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                DomainError::Storage("领域事件序列化结果缺少 event_type 标签".into())
-            })?;
+            .ok_or_else(|| DomainError::Storage("领域事件序列化结果缺少 event_type 标签".into()))?;
         let payload = value.to_string();
         sqlx::query(
             "INSERT INTO domain_events (aggregate, event_type, payload) \

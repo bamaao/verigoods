@@ -112,12 +112,21 @@ mod tests {
         .expect("审计行应存在");
 
         assert_eq!(row.get::<&str, _>("actor"), "did:vg:user:reg-17");
-        assert_eq!(row.get::<Option<&str>, _>("agent"), Some("did:vg:agent:ag-17"));
+        assert_eq!(
+            row.get::<Option<&str>, _>("agent"),
+            Some("did:vg:agent:ag-17")
+        );
         assert_eq!(row.get::<String, _>("action"), "transfer_product");
         assert_eq!(row.get::<String, _>("resource"), "batch:bt-17");
-        assert_eq!(row.get::<Option<String>, _>("policy_id"), Some("pol-17a".into()));
+        assert_eq!(
+            row.get::<Option<String>, _>("policy_id"),
+            Some("pol-17a".into())
+        );
         assert_eq!(row.get::<Option<i64>, _>("policy_version"), Some(2));
-        assert_eq!(row.get::<Option<String>, _>("proof_id"), Some("pf-17a".into()));
+        assert_eq!(
+            row.get::<Option<String>, _>("proof_id"),
+            Some("pf-17a".into())
+        );
         assert_eq!(row.get::<String, _>("result"), "allow");
         assert_eq!(row.get::<DateTime<Utc>, _>("at"), t);
 
@@ -134,7 +143,10 @@ mod tests {
             result: "deny".into(),
             at: t,
         };
-        writer.append(&mut tx, &minimal).await.expect("精简条目应成功");
+        writer
+            .append(&mut tx, &minimal)
+            .await
+            .expect("精简条目应成功");
         let row = sqlx::query(
             "SELECT agent, intent_id, policy_id, policy_version, proof_id \
              FROM audit_events WHERE actor = 'did:vg:user:alice-17'",

@@ -18,10 +18,7 @@ use crate::{enum_from_text, enum_to_text, parse_did, storage, uint_from_db};
 pub struct PgIntentRepository;
 
 /// 枚举文本还原的损坏数据包装（字段名编入错误消息）。
-fn enum_corrupt<T: serde::de::DeserializeOwned>(
-    field: &str,
-    text: &str,
-) -> Result<T, DomainError> {
+fn enum_corrupt<T: serde::de::DeserializeOwned>(field: &str, text: &str) -> Result<T, DomainError> {
     enum_from_text(text)
         .map_err(|e| DomainError::Storage(format!("库中 intents.{field} `{text}` 非法：{e}")))
 }
@@ -38,10 +35,7 @@ fn row_to_intent(row: &sqlx::postgres::PgRow) -> Result<Intent, DomainError> {
         id: IntentId::new(row.get::<String, _>("id")),
         action: enum_corrupt::<IntentAction>("action", &action)?,
         actor: parse_did(&actor)?,
-        on_behalf_of: on_behalf_of
-            .as_deref()
-            .map(parse_did)
-            .transpose()?,
+        on_behalf_of: on_behalf_of.as_deref().map(parse_did).transpose()?,
         payload: serde_json::from_str(&payload)
             .map_err(|e| DomainError::Storage(format!("库中 intents.payload 非法：{e}")))?,
         nonce: uint_from_db(row.get("nonce"), "intent nonce")?,
@@ -68,11 +62,7 @@ impl IntentRepository for PgIntentRepository {
     /// 返回 0 行的两种成因由调用方经 [`IntentRepository::get`] 区分：
     /// `Some` = 同意图 id 重放（幂等同意图），`None` = (actor, nonce)
     /// 冲突的异意图（防重放拒绝）。
-    async fn insert(
-        &self,
-        ctx: &mut Self::Context,
-        intent: &Intent,
-    ) -> Result<(), DomainError> {
+    async fn insert(&self, ctx: &mut Self::Context, intent: &Intent) -> Result<(), DomainError> {
         let payload_text = serde_json::to_string(&intent.payload)
             .map_err(|e| DomainError::Storage(format!("payload 序列化失败：{e}")))?;
         let result = sqlx::query(
@@ -126,11 +116,7 @@ impl IntentRepository for PgIntentRepository {
     /// rejection/result_ref），`created_at` 保留首建值、`updated_at = now()`。
     ///
     /// 供 reject(reason)/confirm(result_ref) 后的落库路径。
-    async fn save(
-        &self,
-        ctx: &mut Self::Context,
-        intent: &Intent,
-    ) -> Result<(), DomainError> {
+    async fn save(&self, ctx: &mut Self::Context, intent: &Intent) -> Result<(), DomainError> {
         let payload_text = serde_json::to_string(&intent.payload)
             .map_err(|e| DomainError::Storage(format!("payload 序列化失败：{e}")))?;
         sqlx::query(
@@ -407,9 +393,7 @@ mod tests {
             "created_at 升序（it-17st 建于 48h 前故最前，含已过期未推进项），终态 it-17rj 排除"
         );
         assert!(pending.iter().all(|i| !i.status.is_terminal()));
-        assert!(!pending
-            .iter()
-            .any(|i| i.id == IntentId::new("it-17rj")));
+        assert!(!pending.iter().any(|i| i.id == IntentId::new("it-17rj")));
 
         tx.commit().await.unwrap();
     }

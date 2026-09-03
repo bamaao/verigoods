@@ -197,8 +197,7 @@ mod tests {
         for prefix in ["00", "04", "zz"] {
             let mut s = prefix.to_string();
             s.push_str(&"ab".repeat(32));
-            let err =
-                CompressedPoint::from_hex(&s).expect_err("非法前缀应被拒绝");
+            let err = CompressedPoint::from_hex(&s).expect_err("非法前缀应被拒绝");
             assert!(
                 matches!(err, DomainError::InvalidInput(_)),
                 "前缀 {prefix} 实际错误：{err:?}"
@@ -218,8 +217,8 @@ mod tests {
         let mut bad = String::from("\"04");
         bad.push_str(&"ab".repeat(32));
         bad.push('"');
-        let err = serde_json::from_str::<CompressedPoint>(&bad)
-            .expect_err("非法前缀反序列化必须失败");
+        let err =
+            serde_json::from_str::<CompressedPoint>(&bad).expect_err("非法前缀反序列化必须失败");
         assert!(err.is_data(), "应为数据错误：{err}");
         // 坏 hex / 长度错误同样拒绝
         assert!(serde_json::from_str::<CompressedPoint>("\"nothex\"").is_err());

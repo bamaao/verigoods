@@ -11,11 +11,11 @@
 //! read_resource）在 [`super::McpServer`] 的 `impl ServerHandler`（mod.rs）
 //! 中显式实现并委托本模块。
 
+use rmcp::model::PaginatedRequestParams;
 use rmcp::model::{
     ListResourceTemplatesResult, ListResourcesResult, ReadResourceRequestParams,
     ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
 };
-use rmcp::model::PaginatedRequestParams;
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer};
 use vg_domain::commodity::{Asset, ProductType};

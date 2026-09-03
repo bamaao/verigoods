@@ -481,12 +481,8 @@ mod tests {
                 .unwrap()
                 .compliance_ok
         );
-        let err = block_on(repo.update_batch_compliance(
-            &mut ctx,
-            &BatchId::new("nope"),
-            true,
-        ))
-        .expect_err("不存在的批次必须报 NotFound");
+        let err = block_on(repo.update_batch_compliance(&mut ctx, &BatchId::new("nope"), true))
+            .expect_err("不存在的批次必须报 NotFound");
         assert!(matches!(err, DomainError::NotFound));
 
         // ---- 单品：save/find 回读一致 ----

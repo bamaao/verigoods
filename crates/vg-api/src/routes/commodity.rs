@@ -121,7 +121,10 @@ pub async fn create_item(
 ) -> Result<axum::Json<vg_application::IntentResult>, ApiError> {
     let (intent_id, on_behalf_of, payload) = split_meta(body)?;
     // 提前校验 hex 形状：避免好形状错误走完整 intent 管道后才被拒
-    if let Some(hex_str) = payload.get("authenticity_commitment").and_then(Value::as_str) {
+    if let Some(hex_str) = payload
+        .get("authenticity_commitment")
+        .and_then(Value::as_str)
+    {
         Hash32::from_hex(hex_str)?;
     }
     run_intent(
@@ -227,7 +230,9 @@ pub async fn get_product(
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;
-    product.map(Json).ok_or(ApiError::from(DomainError::NotFound))
+    product
+        .map(Json)
+        .ok_or(ApiError::from(DomainError::NotFound))
 }
 
 /// 产品建档 body。

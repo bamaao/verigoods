@@ -120,8 +120,7 @@ impl IntentHandler for TransferPublicHandler {
                 .current_state(tx, &payload.subject)
                 .await?
                 .unwrap_or(LifecycleState::Created);
-            let jurisdiction =
-                jurisdiction_of(deps, tx, &from_owner, "转移前所有者").await?;
+            let jurisdiction = jurisdiction_of(deps, tx, &from_owner, "转移前所有者").await?;
             let category = product_category_of(deps, tx, &payload.subject).await?;
             enforced = enforce_transition_policy(
                 deps,

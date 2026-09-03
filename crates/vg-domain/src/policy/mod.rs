@@ -13,7 +13,9 @@ pub mod policy;
 
 pub use abac::{AbacRequest, DataType, Role};
 pub use domain::RegulatoryDomain;
-pub use policy::{Policy, PolicyDecision, PolicyEngine, PolicyVersion, ProofKind, VerifiedProofRef};
+pub use policy::{
+    Policy, PolicyDecision, PolicyEngine, PolicyVersion, ProofKind, VerifiedProofRef,
+};
 
 /// policy 上下文的端口集合。
 pub mod ports {
@@ -206,7 +208,9 @@ mod tests {
             .expect("查询不应报错")
             .expect("刚保存的域应能查到");
         assert_eq!(found, domain);
-        assert!(block_on(repo.find_domain(&mut ctx, "nope")).expect("查询不应报错").is_none());
+        assert!(block_on(repo.find_domain(&mut ctx, "nope"))
+            .expect("查询不应报错")
+            .is_none());
 
         // 策略：同 id 不同版本共存；(id,version) 幂等 upsert
         let v1 = sample_policy("pol-x", 1, "CN", "food");
@@ -239,16 +243,19 @@ mod tests {
         let mut v2b = v2.clone();
         v2b.active = false;
         block_on(repo.save_policy(&mut ctx, &v2b)).expect("重存应成功");
-        assert!(!block_on(repo.find_policy(&mut ctx, &PolicyId::new("pol-x"), 2))
-            .expect("查询不应报错")
-            .expect("v2 应存在")
-            .active);
+        assert!(
+            !block_on(repo.find_policy(&mut ctx, &PolicyId::new("pol-x"), 2))
+                .expect("查询不应报错")
+                .expect("v2 应存在")
+                .active
+        );
 
         // policies_for：按辖区 + 商品类型过滤（含 inactive，时间过滤留给调用方）
-        let candidates = block_on(repo.policies_for(&mut ctx, "CN", "food"))
-            .expect("查询不应报错");
+        let candidates = block_on(repo.policies_for(&mut ctx, "CN", "food")).expect("查询不应报错");
         assert_eq!(candidates.len(), 2); // pol-x v1 / v2（pol-y=EU、pol-z=electronics 被排除）
-        assert!(candidates.iter().all(|p| p.jurisdiction == "CN" && p.product_type == "food"));
+        assert!(candidates
+            .iter()
+            .all(|p| p.jurisdiction == "CN" && p.product_type == "food"));
     }
 
     /// 编译期哨兵（与 identity / credential 同款）：`R::Context: Send`

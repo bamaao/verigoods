@@ -126,7 +126,10 @@ impl IntentHandler for IssueCredentialHandler {
         }
 
         // VC 构造：credential_hash 由领域自动计算并锁定（golden vector）
-        let id = payload.credential_id.clone().unwrap_or_else(CredentialId::generate);
+        let id = payload
+            .credential_id
+            .clone()
+            .unwrap_or_else(CredentialId::generate);
         let vc = VerifiableCredential::new(
             id.clone(),
             issuer.clone(),
@@ -217,7 +220,13 @@ impl IntentHandler for RevokeCredentialHandler {
         vc.transition(CredStatus::Revoked, &actor, now)?;
         // 乐观锁落库（expected=撤销前状态；0 行/状态漂移 → 透传错误）
         deps.credentials
-            .update_status(tx, &payload.credential_id, expected, CredStatus::Revoked, now)
+            .update_status(
+                tx,
+                &payload.credential_id,
+                expected,
+                CredStatus::Revoked,
+                now,
+            )
             .await?;
 
         // 撤销联动：缺失必需凭证 → 强制召回（三分支规则见 services::compliance）
@@ -266,9 +275,7 @@ mod tests {
     use vg_domain::credential::ports::CredentialRepository;
     use vg_domain::credential::CredentialType;
     use vg_domain::identity::ports::IdentityRepository;
-    use vg_domain::identity::{
-        Capability, DidDocument, KeyType, SubjectKind, VerificationMethod,
-    };
+    use vg_domain::identity::{Capability, DidDocument, KeyType, SubjectKind, VerificationMethod};
     use vg_domain::intent::{IntentStatus, RiskLevel};
     use vg_domain::lifecycle::LifecycleState;
     use vg_domain::ownership::ports::OwnershipRepository;
@@ -414,10 +421,7 @@ mod tests {
                     product_type: "food".into(),
                     required_credentials: vec![CredentialType::FoodSafetyInspection],
                     required_proofs: vec![],
-                    transitions: vec![(
-                        LifecycleState::Recalled,
-                        LifecycleState::Available,
-                    )],
+                    transitions: vec![(LifecycleState::Recalled, LifecycleState::Available)],
                     effective_at: Utc::now() - chrono::Duration::days(1),
                     expires_at: None,
                     active: true,
@@ -548,13 +552,11 @@ mod tests {
     }
 
     async fn anchors(pool: &sqlx::PgPool, kind: &str) -> i64 {
-        let (n,): (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM ledger_anchors WHERE kind = $1",
-        )
-        .bind(kind)
-        .fetch_one(pool)
-        .await
-        .unwrap();
+        let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM ledger_anchors WHERE kind = $1")
+            .bind(kind)
+            .fetch_one(pool)
+            .await
+            .unwrap();
         n
     }
 
@@ -588,7 +590,10 @@ mod tests {
         assert_eq!(outbox_types(&pool, "c-1").await, vec!["credential_issued"]);
         assert_eq!(anchors(&pool, "credential_status").await, 1);
         // 签发时凭证已齐备且状态 Available：无状态迁移
-        assert_eq!(batch_state(&pool, "bt-food").await, (true, "available".into()));
+        assert_eq!(
+            batch_state(&pool, "bt-food").await,
+            (true, "available".into())
+        );
 
         // 撤销 → 缺失 food_safety_inspection → 强制召回
         let revoke = eng
@@ -608,7 +613,10 @@ mod tests {
         assert_eq!(revoke.result_ref.as_deref(), Some("vc-food-1"));
         assert_eq!(cred_status(&pool, "vc-food-1").await, "revoked");
         // active 位不动（可售语义属 Delisted 开关），状态 → recalled
-        assert_eq!(batch_state(&pool, "bt-food").await, (true, "recalled".into()));
+        assert_eq!(
+            batch_state(&pool, "bt-food").await,
+            (true, "recalled".into())
+        );
         assert!(
             !batch_compliance(&pool, "bt-food").await,
             "召回联动回写 compliance_ok = false"
@@ -616,7 +624,11 @@ mod tests {
         let mut evs = outbox_types(&pool, "c-2").await;
         evs.sort();
         assert_eq!(evs, vec!["credential_revoked", "product_recalled"]);
-        assert_eq!(anchors(&pool, "credential_status").await, 2, "issue+revoke 各一");
+        assert_eq!(
+            anchors(&pool, "credential_status").await,
+            2,
+            "issue+revoke 各一"
+        );
         let chain = lifecycle_chain(&pool, "batch:bt-food").await;
         assert_eq!(chain.len(), 1);
         assert_eq!(
@@ -788,12 +800,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ghost.status, IntentStatus::Rejected);
-        assert!(
-            ghost
-                .rejection
-                .as_deref()
-                .is_some_and(|r| r.contains("监管域不存在"))
-        );
+        assert!(ghost
+            .rejection
+            .as_deref()
+            .is_some_and(|r| r.contains("监管域不存在")));
 
         // 无 domain_id：Phase1 可无域签发，claims 形状不做 schema 校验
         let free = eng
@@ -848,13 +858,8 @@ mod tests {
             PgIdentityRepo
                 .grant_capability(
                     &mut tx,
-                    &Capability::new(
-                        enterprise.clone(),
-                        Cap::RevokeCredential,
-                        grantor,
-                        None,
-                    )
-                    .unwrap(),
+                    &Capability::new(enterprise.clone(), Cap::RevokeCredential, grantor, None)
+                        .unwrap(),
                 )
                 .await
                 .unwrap();
@@ -883,7 +888,10 @@ mod tests {
         );
         // 凭证状态未被改动，无召回
         assert_eq!(cred_status(&pool, "vc-dup").await, "valid");
-        assert_eq!(batch_state(&pool, "bt-food").await, (true, "available".into()));
+        assert_eq!(
+            batch_state(&pool, "bt-food").await,
+            (true, "available".into())
+        );
 
         // credential_hash / id 重复：同一 VC（含 issued_at 完全一致 → 哈希
         // 一致）直接 save 两次 → UNIQUE 冲突（handler 侧该错误被语义化为
@@ -947,7 +955,10 @@ mod tests {
         ))
         .await
         .unwrap();
-        assert_eq!(batch_state(&pool, "bt-food").await, (true, "recalled".into()));
+        assert_eq!(
+            batch_state(&pool, "bt-food").await,
+            (true, "recalled".into())
+        );
 
         // 第二撤销（凭证本已缺失，状态已 Recalled）→ 不再迁移/不双发
         let second = eng
@@ -1035,7 +1046,10 @@ mod tests {
         ))
         .await
         .unwrap();
-        assert_eq!(batch_state(&pool, "bt-food").await, (true, "recalled".into()));
+        assert_eq!(
+            batch_state(&pool, "bt-food").await,
+            (true, "recalled".into())
+        );
 
         // 重签发 → 凭证齐备但无恢复边：保持 Recalled + compliant:false 事件
         let reissue = eng
@@ -1076,7 +1090,11 @@ mod tests {
             .filter(|(p,)| p["event_type"].as_str() == Some("compliance_changed"))
             .map(|(p,)| p["compliant"].as_bool().unwrap())
             .collect();
-        assert_eq!(flags, vec![false], "恢复门静默拒绝必须留 compliant:false 事件");
+        assert_eq!(
+            flags,
+            vec![false],
+            "恢复门静默拒绝必须留 compliant:false 事件"
+        );
 
         // 生命周期只有一条召回迁移（无 restore）
         assert_eq!(lifecycle_chain(&pool, "batch:bt-food").await.len(), 1);

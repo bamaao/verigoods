@@ -205,18 +205,54 @@ mod tests {
     #[test]
     fn event_type_tag_names_are_snake_case() {
         let tags: Vec<(&'static str, serde_json::Value)> = vec![
-            ("batch_created", serde_json::to_value(&sample_events()[0]).unwrap()),
-            ("batch_split", serde_json::to_value(&sample_events()[1]).unwrap()),
-            ("batch_merged", serde_json::to_value(&sample_events()[2]).unwrap()),
-            ("asset_created", serde_json::to_value(&sample_events()[3]).unwrap()),
-            ("credential_issued", serde_json::to_value(&sample_events()[4]).unwrap()),
-            ("credential_revoked", serde_json::to_value(&sample_events()[5]).unwrap()),
-            ("custody_changed", serde_json::to_value(&sample_events()[6]).unwrap()),
-            ("ownership_transferred", serde_json::to_value(&sample_events()[7]).unwrap()),
-            ("compliance_changed", serde_json::to_value(&sample_events()[8]).unwrap()),
-            ("product_recalled", serde_json::to_value(&sample_events()[9]).unwrap()),
-            ("proof_recorded", serde_json::to_value(&sample_events()[10]).unwrap()),
-            ("state_root_submitted", serde_json::to_value(&sample_events()[11]).unwrap()),
+            (
+                "batch_created",
+                serde_json::to_value(&sample_events()[0]).unwrap(),
+            ),
+            (
+                "batch_split",
+                serde_json::to_value(&sample_events()[1]).unwrap(),
+            ),
+            (
+                "batch_merged",
+                serde_json::to_value(&sample_events()[2]).unwrap(),
+            ),
+            (
+                "asset_created",
+                serde_json::to_value(&sample_events()[3]).unwrap(),
+            ),
+            (
+                "credential_issued",
+                serde_json::to_value(&sample_events()[4]).unwrap(),
+            ),
+            (
+                "credential_revoked",
+                serde_json::to_value(&sample_events()[5]).unwrap(),
+            ),
+            (
+                "custody_changed",
+                serde_json::to_value(&sample_events()[6]).unwrap(),
+            ),
+            (
+                "ownership_transferred",
+                serde_json::to_value(&sample_events()[7]).unwrap(),
+            ),
+            (
+                "compliance_changed",
+                serde_json::to_value(&sample_events()[8]).unwrap(),
+            ),
+            (
+                "product_recalled",
+                serde_json::to_value(&sample_events()[9]).unwrap(),
+            ),
+            (
+                "proof_recorded",
+                serde_json::to_value(&sample_events()[10]).unwrap(),
+            ),
+            (
+                "state_root_submitted",
+                serde_json::to_value(&sample_events()[11]).unwrap(),
+            ),
         ];
         for (expected, v) in tags {
             assert_eq!(v["event_type"], json!(expected), "标签名断言失败：{v}");
@@ -249,8 +285,6 @@ mod tests {
         assert_eq!(v["batch_ref"], json!("batch-42"));
 
         // 未知 event_type 拒绝
-        assert!(
-            serde_json::from_str::<DomainEvent>(r#"{"event_type":"nonsense"}"#).is_err()
-        );
+        assert!(serde_json::from_str::<DomainEvent>(r#"{"event_type":"nonsense"}"#).is_err());
     }
 }

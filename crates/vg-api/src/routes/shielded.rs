@@ -178,7 +178,13 @@ pub async fn grant(
     crate::AppJson(body): crate::AppJson<GrantBody>,
 ) -> Result<Json<Value>, ApiError> {
     super::require_regulator(&state, &admin).await?;
-    grant_data_access(state.engine.deps(), &body.grantee, &body.dataset, body.until).await?;
+    grant_data_access(
+        state.engine.deps(),
+        &body.grantee,
+        &body.dataset,
+        body.until,
+    )
+    .await?;
     Ok(Json(json!({
         "grantee": body.grantee,
         "dataset": body.dataset,

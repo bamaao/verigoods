@@ -133,8 +133,7 @@ impl Note {
     pub fn commitment_parts(&self) -> Vec<[u8; 32]> {
         let label = Hash32::keccak(b"vg:note:v1");
         // serde_json 对固定字段的序列化是确定性的（键序固定为 type, id）
-        let asset_json =
-            serde_json::to_vec(&self.asset_ref).expect("SubjectRef 序列化不可失败");
+        let asset_json = serde_json::to_vec(&self.asset_ref).expect("SubjectRef 序列化不可失败");
         let asset_word = Hash32::keccak(&asset_json);
 
         let mut amount_word = [0u8; 32];
@@ -311,7 +310,10 @@ mod tests {
     #[test]
     fn accessors_expose_fields() {
         let note = sample_note();
-        assert_eq!(note.asset_ref(), &SubjectRef::Batch(BatchId::new("batch-007")));
+        assert_eq!(
+            note.asset_ref(),
+            &SubjectRef::Batch(BatchId::new("batch-007"))
+        );
         assert_eq!(note.owner_ot_addr(), Hash32::keccak(b"ot-addr"));
         assert_eq!(note.amount(), 10);
         assert_eq!(note.secret().len(), 32);
@@ -391,10 +393,9 @@ mod tests {
     /// Task 10（NoteHasher/Poseidon2）及 Task 11（note_opening 电路）实现**。
     #[test]
     fn commitment_parts_golden_vector() {
-        let owner = Hash32::from_hex(
-            "1111111111111111111111111111111111111111111111111111111111111111",
-        )
-        .unwrap();
+        let owner =
+            Hash32::from_hex("1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
         let mut secret = [0u8; 32];
         secret[0] = 0x22;
         let mut salt = [0u8; 16];
@@ -413,12 +414,36 @@ mod tests {
             let b = hex::decode(hex).expect("golden hex 合法");
             b.try_into().expect("golden hex 恰为 32 字节")
         };
-        assert_eq!(parts[0], word("a4c41c2383a5fd0b250bce28a902ebfb3480349f8714a9232a3dd279831f061d"), "词 0：域分隔标签 keccak(\"vg:note:v1\")");
-        assert_eq!(parts[1], word("0ac2d6796d51fb5318755791b4b3e1e9180d58e74167ea2a71c81b4cbe41be52"), "词 1：asset 词 keccak(canonical JSON of golden-1)");
-        assert_eq!(parts[2], word("1111111111111111111111111111111111111111111111111111111111111111"), "词 2：owner 原样");
-        assert_eq!(parts[3], word("0700000000000000000000000000000000000000000000000000000000000000"), "词 3：amount=7 小端");
-        assert_eq!(parts[4], word("2200000000000000000000000000000000000000000000000000000000000000"), "词 4：secret 原样");
-        assert_eq!(parts[5], word("0000000000000000000000000000000033445566000000000000000000000000"), "词 5：salt 高 16 字节填零（低 16 字节 = 33445566 左对齐）");
+        assert_eq!(
+            parts[0],
+            word("a4c41c2383a5fd0b250bce28a902ebfb3480349f8714a9232a3dd279831f061d"),
+            "词 0：域分隔标签 keccak(\"vg:note:v1\")"
+        );
+        assert_eq!(
+            parts[1],
+            word("0ac2d6796d51fb5318755791b4b3e1e9180d58e74167ea2a71c81b4cbe41be52"),
+            "词 1：asset 词 keccak(canonical JSON of golden-1)"
+        );
+        assert_eq!(
+            parts[2],
+            word("1111111111111111111111111111111111111111111111111111111111111111"),
+            "词 2：owner 原样"
+        );
+        assert_eq!(
+            parts[3],
+            word("0700000000000000000000000000000000000000000000000000000000000000"),
+            "词 3：amount=7 小端"
+        );
+        assert_eq!(
+            parts[4],
+            word("2200000000000000000000000000000000000000000000000000000000000000"),
+            "词 4：secret 原样"
+        );
+        assert_eq!(
+            parts[5],
+            word("0000000000000000000000000000000033445566000000000000000000000000"),
+            "词 5：salt 高 16 字节填零（低 16 字节 = 33445566 左对齐）"
+        );
     }
 
     #[test]

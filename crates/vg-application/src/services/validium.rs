@@ -71,28 +71,27 @@ pub async fn submit_validium_root(
     .await
     .map_err(|e| DomainError::Storage(format!("validium_batches 写入失败：{e}")))?;
 
-    let effective = if inserted.rows_affected() == 0 {
-        // 幂等分支：返回既有根（首批结果不可改写）
-        let row = sqlx::query("SELECT root FROM validium_batches WHERE batch_ref = $1")
-            .bind(batch_ref)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| DomainError::Storage(format!("validium_batches 读取失败：{e}")))?;
-        let bytes: Vec<u8> = row.get("root");
-        Hash32::from_bytes(bytes.try_into().map_err(|_| {
-            DomainError::Storage("库中 validium_batches.root 长度非法".to_string())
-        })?)
-    } else {
-        root
-    };
+    let effective =
+        if inserted.rows_affected() == 0 {
+            // 幂等分支：返回既有根（首批结果不可改写）
+            let row = sqlx::query("SELECT root FROM validium_batches WHERE batch_ref = $1")
+                .bind(batch_ref)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| DomainError::Storage(format!("validium_batches 读取失败：{e}")))?;
+            let bytes: Vec<u8> = row.get("root");
+            Hash32::from_bytes(bytes.try_into().map_err(|_| {
+                DomainError::Storage("库中 validium_batches.root 长度非法".to_string())
+            })?)
+        } else {
+            root
+        };
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;
 
     // 先库后锚（悬挂锚契约）
-    deps.ledger
-        .submit_state_root(effective, batch_ref)
-        .await?;
+    deps.ledger.submit_state_root(effective, batch_ref).await?;
     Ok(effective)
 }
 
@@ -130,11 +129,12 @@ pub async fn data_access_until(
     regulator: &Did,
     dataset: &str,
 ) -> Result<Option<DateTime<Utc>>, AppError> {
-    let row = sqlx::query("SELECT until FROM data_access_grants WHERE grantee = $1 AND dataset = $2")
-        .bind(regulator.as_str())
-        .bind(dataset)
-        .fetch_optional(&deps.pool)
-        .await
-        .map_err(|e| DomainError::Storage(format!("data_access_grants 读取失败：{e}")))?;
+    let row =
+        sqlx::query("SELECT until FROM data_access_grants WHERE grantee = $1 AND dataset = $2")
+            .bind(regulator.as_str())
+            .bind(dataset)
+            .fetch_optional(&deps.pool)
+            .await
+            .map_err(|e| DomainError::Storage(format!("data_access_grants 读取失败：{e}")))?;
     Ok(row.map(|r| r.get("until")))
 }

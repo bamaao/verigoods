@@ -104,10 +104,11 @@ pub(crate) async fn require_owner(
 ///
 /// 违规 → [`DomainError::InvalidInput`]（业务拒绝而非调用方 Err：
 /// 意图已落库，拒绝留痕走审计）。
-pub(crate) fn parse_payload<T: DeserializeOwned>(intent: &vg_domain::intent::Intent) -> Result<T, DomainError> {
-    serde_json::from_value(intent.payload.clone()).map_err(|e| {
-        DomainError::InvalidInput(format!("payload 不符合契约：{e}"))
-    })
+pub(crate) fn parse_payload<T: DeserializeOwned>(
+    intent: &vg_domain::intent::Intent,
+) -> Result<T, DomainError> {
+    serde_json::from_value(intent.payload.clone())
+        .map_err(|e| DomainError::InvalidInput(format!("payload 不符合契约：{e}")))
 }
 
 /// 读取 DID 文档的辖区；文档缺失 → [`DomainError::Unauthorized`]，
@@ -152,12 +153,13 @@ pub(crate) async fn product_category_of(
                 .ok_or(DomainError::NotFound)?
                 .product
         }
-        SubjectRef::Asset(id) => deps
-            .commodity
-            .find_asset(tx, id)
-            .await?
-            .ok_or(DomainError::NotFound)?
-            .product,
+        SubjectRef::Asset(id) => {
+            deps.commodity
+                .find_asset(tx, id)
+                .await?
+                .ok_or(DomainError::NotFound)?
+                .product
+        }
     };
     Ok(deps
         .commodity
@@ -190,10 +192,7 @@ pub(crate) async fn enforce_transition_policy(
         .policies
         .policies_for(tx, jurisdiction, product_type)
         .await?;
-    let creds = deps
-        .credentials
-        .list_by_subject(tx, cred_subject)
-        .await?;
+    let creds = deps.credentials.list_by_subject(tx, cred_subject).await?;
     let decision = PolicyEngine::check_transition(&policies, &creds, &[], from, to, now)?;
     Ok(decision.enforced)
 }
@@ -247,7 +246,9 @@ pub(crate) async fn record_lifecycle_transition(
                 LifecycleState::Delisted => false,
                 _ => current.active,
             };
-            deps.commodity.update_batch_state(tx, id, to, active).await?;
+            deps.commodity
+                .update_batch_state(tx, id, to, active)
+                .await?;
         }
         SubjectRef::Asset(id) => {
             let mut asset = deps
@@ -279,16 +280,12 @@ mod tests {
     use vg_domain::credential::ports::CredentialRepository;
     use vg_domain::credential::{CredentialType, VerifiableCredential};
     use vg_domain::identity::ports::IdentityRepository;
-    use vg_domain::identity::{
-        Capability, DidDocument, KeyType, SubjectKind, VerificationMethod,
-    };
+    use vg_domain::identity::{Capability, DidDocument, KeyType, SubjectKind, VerificationMethod};
     use vg_domain::intent::{IntentAction, IntentStatus, RiskLevel};
     use vg_domain::policy::ports::PolicyRepository;
     use vg_domain::policy::Policy;
     use vg_domain::ports::{CircuitSpec, NoteHasher, ProofProver, Witness};
-    use vg_domain::shared::{
-        CredentialId, DomainError, Hash32, IntentId, PolicyId, ProductId,
-    };
+    use vg_domain::shared::{CredentialId, DomainError, Hash32, IntentId, PolicyId, ProductId};
     use vg_infra_pg::{
         InProcessLedger, PgApprovalsStore, PgAuditWriter, PgCommodityRepo, PgCredentialRepo,
         PgIdentityRepo, PgIntentRepository, PgLifecycleRepo, PgOutbox, PgOwnershipRepo,
@@ -401,7 +398,12 @@ mod tests {
         identity
             .save_document(
                 &mut tx,
-                &doc(grantor.clone(), SubjectKind::Enterprise, None, Some("CN".into())),
+                &doc(
+                    grantor.clone(),
+                    SubjectKind::Enterprise,
+                    None,
+                    Some("CN".into()),
+                ),
             )
             .await
             .unwrap();
@@ -616,7 +618,12 @@ mod tests {
             PgIdentityRepo
                 .save_document(
                     &mut tx,
-                    &doc(retailer.clone(), SubjectKind::Enterprise, None, Some("CN".into())),
+                    &doc(
+                        retailer.clone(),
+                        SubjectKind::Enterprise,
+                        None,
+                        Some("CN".into()),
+                    ),
                 )
                 .await
                 .unwrap();
@@ -745,7 +752,11 @@ mod tests {
             .unwrap();
         assert_eq!(r4.status, IntentStatus::Confirmed);
         assert_eq!(r4.risk, RiskLevel::L3);
-        assert_eq!(r4.result_ref.as_deref(), Some("tr:p-4"), "转移记录 ID 派生自 intent");
+        assert_eq!(
+            r4.result_ref.as_deref(),
+            Some("tr:p-4"),
+            "转移记录 ID 派生自 intent"
+        );
         assert_eq!(
             ownership_row(&pool, label).await,
             (retailer.to_string(), 1, 0)
@@ -853,7 +864,12 @@ mod tests {
         let buyer_a = did("did:vg:user:buyer-a");
         let buyer_b = did("did:vg:user:buyer-b");
         use vg_domain::identity::capability::Action as Cap;
-        seed_enterprise(&pool, &enterprise, &[Cap::CreateBatch, Cap::TransferOwnership]).await;
+        seed_enterprise(
+            &pool,
+            &enterprise,
+            &[Cap::CreateBatch, Cap::TransferOwnership],
+        )
+        .await;
         seed_product(&pool, "pd-pork").await;
         let eng = engine(pool.clone());
 
@@ -984,7 +1000,9 @@ mod tests {
             .unwrap();
         assert_eq!(bad.status, IntentStatus::Rejected);
         assert!(
-            bad.rejection.as_deref().is_some_and(|r| r.contains("数量不一致")),
+            bad.rejection
+                .as_deref()
+                .is_some_and(|r| r.contains("数量不一致")),
             "实际：{:?}",
             bad.rejection
         );
@@ -993,12 +1011,11 @@ mod tests {
             batch_active_state(&pool, "bt-g").await,
             (true, "created".into())
         );
-        let kids: (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM batches WHERE id IN ('bt-x1','bt-x2')",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let kids: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM batches WHERE id IN ('bt-x1','bt-x2')")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(kids.0, 0);
     }
 
@@ -1085,18 +1102,22 @@ mod tests {
             "authenticity_commitment": commitment.to_string()
         });
         let r = eng
-            .execute(raw("i-1", IntentAction::CreateItem, &maker, payload.clone()))
+            .execute(raw(
+                "i-1",
+                IntentAction::CreateItem,
+                &maker,
+                payload.clone(),
+            ))
             .await
             .unwrap();
         assert_eq!(r.status, IntentStatus::Confirmed);
         assert_eq!(r.result_ref.as_deref(), Some("as-1"));
         assert_eq!(outbox_types(&pool, "i-1").await, vec!["asset_created"]);
-        let asset: (String, String) = sqlx::query_as(
-            "SELECT state, manufacturer FROM assets WHERE id = 'as-1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let asset: (String, String) =
+            sqlx::query_as("SELECT state, manufacturer FROM assets WHERE id = 'as-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(asset, ("created".into(), maker.to_string()));
         assert_eq!(
             ownership_row(&pool, "asset:as-1").await,
@@ -1109,7 +1130,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(dup.status, IntentStatus::Rejected);
-        assert!(dup.rejection.as_deref().is_some_and(|x| x.contains("资源已存在")));
+        assert!(dup
+            .rejection
+            .as_deref()
+            .is_some_and(|x| x.contains("资源已存在")));
     }
 
     /// 缺凭证 → PolicyViolated 拒绝（Created→Produced 无 ProductionLicense）。
@@ -1165,7 +1189,12 @@ mod tests {
     async fn transfer_self_and_uninitialized_rejected(pool: sqlx::PgPool) {
         let enterprise = did("did:vg:user:ent-rej");
         use vg_domain::identity::capability::Action as Cap;
-        seed_enterprise(&pool, &enterprise, &[Cap::CreateBatch, Cap::TransferOwnership]).await;
+        seed_enterprise(
+            &pool,
+            &enterprise,
+            &[Cap::CreateBatch, Cap::TransferOwnership],
+        )
+        .await;
         seed_product(&pool, "pd-pork").await;
         let eng = engine(pool.clone());
 
@@ -1195,12 +1224,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(self_r.status, IntentStatus::Rejected);
-        assert!(
-            self_r
-                .rejection
-                .as_deref()
-                .is_some_and(|x| x.contains("非法状态迁移"))
-        );
+        assert!(self_r
+            .rejection
+            .as_deref()
+            .is_some_and(|x| x.contains("非法状态迁移")));
 
         // 未建档主体：从未 create 的批次直接转移
         let no_owner = eng
@@ -1216,12 +1243,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(no_owner.status, IntentStatus::Rejected);
-        assert!(
-            no_owner
-                .rejection
-                .as_deref()
-                .is_some_and(|x| x.contains("所有权档案"))
-        );
+        assert!(no_owner
+            .rejection
+            .as_deref()
+            .is_some_and(|x| x.contains("所有权档案")));
     }
 
     // ---- C1/C2/I2：授权闸门与 active 口径 ----
@@ -1264,7 +1289,9 @@ mod tests {
             .unwrap();
         assert_eq!(r.status, IntentStatus::Rejected);
         assert!(
-            r.rejection.as_deref().is_some_and(|x| x.contains("无权操作")),
+            r.rejection
+                .as_deref()
+                .is_some_and(|x| x.contains("无权操作")),
             "实际：{:?}",
             r.rejection
         );
@@ -1296,7 +1323,12 @@ mod tests {
             PgIdentityRepo
                 .save_document(
                     &mut tx,
-                    &doc(agent.clone(), SubjectKind::Agent, Some(enterprise.clone()), Some("CN".into())),
+                    &doc(
+                        agent.clone(),
+                        SubjectKind::Agent,
+                        Some(enterprise.clone()),
+                        Some("CN".into()),
+                    ),
                 )
                 .await
                 .unwrap();
@@ -1357,7 +1389,12 @@ mod tests {
             &[Cap::CreateBatch, Cap::TransferOwnership, Cap::UpdateCustody],
         )
         .await;
-        seed_enterprise(&pool, &inspector, &[Cap::UpdateCustody, Cap::TransferOwnership]).await;
+        seed_enterprise(
+            &pool,
+            &inspector,
+            &[Cap::UpdateCustody, Cap::TransferOwnership],
+        )
+        .await;
         seed_product(&pool, "pd-pork").await;
         let eng = engine(pool.clone());
         let subject = batch_subject("bt-cu");
@@ -1417,7 +1454,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(steal.status, IntentStatus::Rejected);
-        assert!(steal.rejection.as_deref().is_some_and(|x| x.contains("无权操作")));
+        assert!(steal
+            .rejection
+            .as_deref()
+            .is_some_and(|x| x.contains("无权操作")));
         assert_eq!(
             ownership_row(&pool, "batch:bt-cu").await,
             (enterprise.to_string(), 0, 0)
@@ -1435,10 +1475,7 @@ mod tests {
         seed_product(&pool, "pd-pork").await;
         let eng = engine(pool.clone());
 
-        for (intent, actor, id) in [
-            ("x-a", &ent_a, "bt-o1"),
-            ("x-b", &ent_b, "bt-o2"),
-        ] {
+        for (intent, actor, id) in [("x-a", &ent_a, "bt-o1"), ("x-b", &ent_b, "bt-o2")] {
             eng.execute(raw(
                 intent,
                 IntentAction::CreateBatch,
@@ -1467,10 +1504,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status, IntentStatus::Rejected);
-        assert!(r.rejection.as_deref().is_some_and(|x| x.contains("无权操作")));
+        assert!(r
+            .rejection
+            .as_deref()
+            .is_some_and(|x| x.contains("无权操作")));
         // 零副作用：两父批仍有效、新批不落库
-        assert_eq!(batch_active_state(&pool, "bt-o1").await, (true, "created".into()));
-        assert_eq!(batch_active_state(&pool, "bt-o2").await, (true, "created".into()));
+        assert_eq!(
+            batch_active_state(&pool, "bt-o1").await,
+            (true, "created".into())
+        );
+        assert_eq!(
+            batch_active_state(&pool, "bt-o2").await,
+            (true, "created".into())
+        );
         let none: (i64,) = sqlx::query_as("SELECT count(*) FROM batches WHERE id = 'bt-om'")
             .fetch_one(&pool)
             .await

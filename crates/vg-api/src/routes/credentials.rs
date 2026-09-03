@@ -54,10 +54,7 @@ pub async fn revoke(
     let obj = payload
         .as_object_mut()
         .expect("split_meta 已保证 payload 为对象");
-    obj.insert(
-        "credential_id".into(),
-        Value::String(credential_id),
-    );
+    obj.insert("credential_id".into(), Value::String(credential_id));
     run_intent(
         &state.engine,
         actor,

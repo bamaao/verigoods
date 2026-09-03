@@ -15,11 +15,11 @@
 //!   唯一约束兜底，冲突 → 409）；
 //! - intent 服务端过期窗口：10 分钟。
 
-pub mod compliance;
-pub mod health;
 pub mod commodity;
+pub mod compliance;
 pub mod consumer;
 pub mod credentials;
+pub mod health;
 pub mod identity;
 pub mod intent;
 pub mod policy;
@@ -39,9 +39,11 @@ const INTENT_TTL_MINUTES: i64 = 10;
 
 /// 解析 `batch:<id>` / `asset:<id>` 口径的 subject 参数（路径或 query）。
 pub(crate) fn parse_subject_param(raw: &str) -> Result<SubjectRef, ApiError> {
-    let (kind, id) = raw
-        .split_once(':')
-        .ok_or_else(|| ApiError::bad_request(format!("subject 参数必须为 `batch:<id>` 或 `asset:<id>` 口径，实际：{raw}")))?;
+    let (kind, id) = raw.split_once(':').ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "subject 参数必须为 `batch:<id>` 或 `asset:<id>` 口径，实际：{raw}"
+        ))
+    })?;
     match kind {
         "batch" => Ok(SubjectRef::Batch(vg_domain::shared::BatchId::new(id))),
         "asset" => Ok(SubjectRef::Asset(vg_domain::shared::AssetId::new(id))),
@@ -53,7 +55,9 @@ pub(crate) fn parse_subject_param(raw: &str) -> Result<SubjectRef, ApiError> {
 
 /// 从 REST body 剥离路由元字段（`intent_id` / `on_behalf_of`），
 /// 返回 (幂等键, 被代理方, 业务 payload)。剩余部分必须为 JSON object。
-pub(crate) fn split_meta(mut body: Value) -> Result<(Option<String>, Option<Did>, Value), ApiError> {
+pub(crate) fn split_meta(
+    mut body: Value,
+) -> Result<(Option<String>, Option<Did>, Value), ApiError> {
     let obj = body
         .as_object_mut()
         .ok_or_else(|| ApiError::bad_request("请求体必须为 JSON 对象"))?;

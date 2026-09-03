@@ -422,7 +422,9 @@ where
         // 2. 块内容钉死（所有行）：c=1 行吸收 prev 词、c=2 行吸收
         // [t_j, 0…]、c=3 行吸收 sentinel‖零、其余行 block = 0
         builder.assert_zero(
-            local[BLOCK_COL].into() - s1.clone() * local[PV0_COL].into() - s2.clone() * local[TV_COL].into()
+            local[BLOCK_COL].into()
+                - s1.clone() * local[PV0_COL].into()
+                - s2.clone() * local[TV_COL].into()
                 - s3.clone(),
         );
         for i in 1..RATE {
@@ -500,8 +502,9 @@ where
             when_transition.assert_zero(one_minus_start_n.clone() * chain);
         }
         for i in RATE..WIDTH {
-            when_transition
-                .assert_zero(one_minus_start_n.clone() * (inputs_next[i].into() - out_local[i].into()));
+            when_transition.assert_zero(
+                one_minus_start_n.clone() * (inputs_next[i].into() - out_local[i].into()),
+            );
         }
         // start 行进入：inputs' = label‖零（每读数块全新 sponge）
         for (input_next, label_i) in inputs_next.iter().zip(self.label) {
@@ -514,7 +517,8 @@ where
         // 3. 块内常量：pv / tv 仅在读数块边界（bend 转移）可变
         for i in 0..RATE {
             when_transition.assert_zero(
-                (one.clone() - bend.clone()) * (next[PV0_COL + i].into() - local[PV0_COL + i].into()),
+                (one.clone() - bend.clone())
+                    * (next[PV0_COL + i].into() - local[PV0_COL + i].into()),
             );
         }
         when_transition.assert_zero(
@@ -523,7 +527,8 @@ where
 
         // 4. 组间 prev 传递：下一块的 pv = 本块（bend 行）置换输出
         for i in 0..RATE {
-            when_transition.assert_zero(bend.clone() * (next[PV0_COL + i].into() - out_local[i].into()));
+            when_transition
+                .assert_zero(bend.clone() * (next[PV0_COL + i].into() - out_local[i].into()));
         }
 
         // 7. 累积器：区内加倍（cont = zb·zb'）、区首复位为位值
@@ -543,8 +548,7 @@ where
             one_minus_zstart_n.clone()
                 * (next[EQ_COL].into() - eq.clone() + eq.clone() * next[DB_COL].into()),
         );
-        when_transition
-            .assert_zero(zstart_n.clone() * (next[EQ_COL].into() - one.clone()));
+        when_transition.assert_zero(zstart_n.clone() * (next[EQ_COL].into() - one.clone()));
         when_transition
             .assert_zero(one_minus_zstart_n.clone() * (next[EQP_COL].into() - eq.clone()));
         when_transition.assert_zero(zstart_n.clone() * (next[EQP_COL].into() - one.clone()));
@@ -666,7 +670,11 @@ fn build_witness(readings: &[u32; NUM_READINGS], t_max: u32) -> Witness {
             let bb = (t_max >> i) & 1;
             let eqp = if k == 0 { one_f } else { eq };
             let db = if xb == bb { zero_f } else { one_f };
-            let win = if eqp == one_f && xb == 0 && bb == 1 { one_f } else { zero_f };
+            let win = if eqp == one_f && xb == 0 && bb == 1 {
+                one_f
+            } else {
+                zero_f
+            };
             // 区首复位（约束 8/10），区内按链推进
             eq = if k == 0 { one_f } else { eq * (one_f - db) };
             lt = if k == 0 { zero_f } else { lt + win };
@@ -907,12 +915,12 @@ mod tests {
     use std::time::Instant;
 
     /// 黄金读数（centi-degree：23.50℃ … 24.20℃）与上限 25.00℃。
-    const GOLDEN_READINGS: [u32; NUM_READINGS] =
-        [2350, 2400, 2380, 2415, 2390, 2365, 2420, 2375];
+    const GOLDEN_READINGS: [u32; NUM_READINGS] = [2350, 2400, 2380, 2415, 2390, 2365, 2420, 2375];
     const GOLDEN_T_MAX: u32 = 2500;
 
     /// 黄金链根 hex（字面 fixture，首次由 host 计算后锁定）。
-    const GOLDEN_ROOT_HEX: &str = "27ab2150f1383e57968fee51efda4c4194075d4bcbfc483973db3f66180cdb18";
+    const GOLDEN_ROOT_HEX: &str =
+        "27ab2150f1383e57968fee51efda4c4194075d4bcbfc483973db3f66180cdb18";
 
     /// 黄金 root 的 8 个 u32 小端 limb。
     fn golden_root_limbs() -> [u32; 8] {
@@ -938,8 +946,8 @@ mod tests {
         );
 
         let start = Instant::now();
-        let output = prove_coldchain(&GOLDEN_READINGS, GOLDEN_T_MAX)
-            .expect("黄金见证 prove 应成功");
+        let output =
+            prove_coldchain(&GOLDEN_READINGS, GOLDEN_T_MAX).expect("黄金见证 prove 应成功");
         let prove_secs = start.elapsed().as_secs_f64();
 
         let start = Instant::now();
@@ -984,8 +992,8 @@ mod tests {
     fn violating_sequences_rejected() {
         // 某读数 > T_max：prove 前置拦截（不 panic）
         let readings = [2350, 2400, 2501, 2415, 2390, 2365, 2420, 2375];
-        let err = prove_coldchain(&readings, 2500)
-            .expect_err("t_2 = 2501 > t_max = 2500 必须被拒绝");
+        let err =
+            prove_coldchain(&readings, 2500).expect_err("t_2 = 2501 > t_max = 2500 必须被拒绝");
         assert!(matches!(err, ZkError::InvalidWitness(_)));
         // 编码边界：t_max ≥ 2^30、读数 ≥ 2^30
         let err = prove_coldchain(&GOLDEN_READINGS, 1 << 30).expect_err("t_max ≥ 2^30 必须被拒绝");
@@ -1003,12 +1011,18 @@ mod tests {
         // 篡改 T_max（更小使某读数越界）→ false
         let mut tampered = output.clone();
         tampered.public_limbs[0] = 2400; // t_1 = 2400 ≤、t_3 = 2415 > 2400
-        assert!(!verify_coldchain(&tampered), "缩小 T_max 使读数越界必须 false");
+        assert!(
+            !verify_coldchain(&tampered),
+            "缩小 T_max 使读数越界必须 false"
+        );
         // 篡改 root 任一 limb → false
         for i in 1..NUM_PUBLICS {
             let mut tampered = output.clone();
             tampered.public_limbs[i] ^= 1;
-            assert!(!verify_coldchain(&tampered), "篡改 root limb {i} 必须 false");
+            assert!(
+                !verify_coldchain(&tampered),
+                "篡改 root limb {i} 必须 false"
+            );
         }
         // T_max 篡改为 ≥ 2^30 的装载（位重建绑定封死）
         let mut tampered = output.clone();
@@ -1052,7 +1066,11 @@ mod tests {
                 .iter()
                 .map(|e| e.as_canonical_u32())
                 .collect();
-            assert_eq!(got, expected, "读数 {:?} 的 root limb 必须与 host 一致", readings);
+            assert_eq!(
+                got, expected,
+                "读数 {:?} 的 root limb 必须与 host 一致",
+                readings
+            );
         }
     }
 

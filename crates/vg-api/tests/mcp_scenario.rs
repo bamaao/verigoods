@@ -20,12 +20,12 @@ use tower::ServiceExt as _;
 use vg_api::mcp::McpServer;
 use vg_api::state::{AppState, NonceStore, SharedState};
 use vg_application::{AppDeps, HandlerMap, IntentEngine};
+use vg_domain::commodity::ports::CommodityRepository;
 use vg_domain::identity::ports::IdentityRepository;
 use vg_domain::identity::{Capability, DidDocument, KeyType, SubjectKind, VerificationMethod};
 use vg_domain::shared::{Did, Hash32};
 use vg_infra_crypto::KeyPair;
 use vg_infra_pg::*;
-use vg_domain::commodity::ports::CommodityRepository;
 
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ClientInfo, ContentBlock, GetPromptRequestParams,
@@ -72,7 +72,8 @@ async fn seed_mock_identity(pool: &sqlx::PgPool, caps: &[vg_domain::identity::Ac
     let did = mock_did();
     // 文档公钥摘要无对应私钥也无妨：MCP in-process 不走 VG-SIG 验签
     let kp = KeyPair::generate();
-    let method = VerificationMethod::new("k-0", KeyType::Secp256k1, kp.pubkey_digest(), did.clone());
+    let method =
+        VerificationMethod::new("k-0", KeyType::Secp256k1, kp.pubkey_digest(), did.clone());
     let doc = DidDocument {
         did: did.clone(),
         kind: SubjectKind::Enterprise,
@@ -116,7 +117,9 @@ impl ClientHandler for DummyClientHandler {
 }
 
 /// 起一对 in-process（server, client）。
-async fn in_process(state: SharedState) -> rmcp::service::RunningService<rmcp::RoleClient, DummyClientHandler> {
+async fn in_process(
+    state: SharedState,
+) -> rmcp::service::RunningService<rmcp::RoleClient, DummyClientHandler> {
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
     let server = McpServer::new(state);
     tokio::spawn(async move {
@@ -156,21 +159,36 @@ async fn tools_list_contains_all(pool: sqlx::PgPool) {
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     let expected = [
         // commodity
-        "mcp_create_batch", "mcp_split_batch", "mcp_merge_batch", "mcp_create_item", "mcp_get_batch",
+        "mcp_create_batch",
+        "mcp_split_batch",
+        "mcp_merge_batch",
+        "mcp_create_item",
+        "mcp_get_batch",
         // ownership
-        "mcp_get_ownership", "mcp_get_custody",
+        "mcp_get_ownership",
+        "mcp_get_custody",
         // transaction
-        "mcp_transfer_product", "mcp_update_custody", "mcp_get_intent", "mcp_approve_intent",
+        "mcp_transfer_product",
+        "mcp_update_custody",
+        "mcp_get_intent",
+        "mcp_approve_intent",
         "mcp_list_transfers",
         // credential
-        "mcp_issue_credential", "mcp_revoke_credential", "mcp_list_credentials",
+        "mcp_issue_credential",
+        "mcp_revoke_credential",
+        "mcp_list_credentials",
         // compliance
-        "mcp_check_compliance", "mcp_get_required_credentials",
+        "mcp_check_compliance",
+        "mcp_get_required_credentials",
         // zk
-        "mcp_scan_shielded_notes", "mcp_get_proof",
+        "mcp_scan_shielded_notes",
+        "mcp_get_proof",
     ];
     for want in expected {
-        assert!(names.contains(&want.to_string()), "缺少工具 {want}，实际：{names:?}");
+        assert!(
+            names.contains(&want.to_string()),
+            "缺少工具 {want}，实际：{names:?}"
+        );
     }
     assert_eq!(names.len(), expected.len(), "工具数应恰为 19：{names:?}");
 }
@@ -225,13 +243,19 @@ async fn resources_templates_and_read(pool: sqlx::PgPool) {
 
     // 模板存在
     let templates = client.list_all_resource_templates().await.unwrap();
-    let uris: Vec<String> = templates.iter().map(|t| t.uri_template.to_string()).collect();
+    let uris: Vec<String> = templates
+        .iter()
+        .map(|t| t.uri_template.to_string())
+        .collect();
     for want in [
         "commodity://batch/{id}",
         "commodity://asset/{id}",
         "commodity://product/{id}",
     ] {
-        assert!(uris.contains(&want.to_string()), "缺少模板 {want}：{uris:?}");
+        assert!(
+            uris.contains(&want.to_string()),
+            "缺少模板 {want}：{uris:?}"
+        );
     }
 
     // 先经工具建批，再读资源
@@ -320,7 +344,11 @@ async fn create_batch_without_capability_is_business_rejection(pool: sqlx::PgPoo
         )
         .await
         .unwrap();
-    assert_ne!(result.is_error, Some(true), "业务拒绝不是协议/工具错误：{result:?}");
+    assert_ne!(
+        result.is_error,
+        Some(true),
+        "业务拒绝不是协议/工具错误：{result:?}"
+    );
     let v = tool_json(&result);
     assert_eq!(v["status"], "rejected", "无能力应业务拒绝：{v}");
     let rejection = v["rejection"].as_str().unwrap_or_default();
@@ -342,7 +370,11 @@ async fn scan_notes_invalid_key_is_tool_error_with_code(pool: sqlx::PgPool) {
         )
         .await
         .unwrap();
-    assert_eq!(result.is_error, Some(true), "非法入参应返回工具错误：{result:?}");
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "非法入参应返回工具错误：{result:?}"
+    );
     let v = tool_json(&result);
     let code = v["code"].as_str().unwrap_or_default();
     assert!(!code.is_empty(), "错误体应含非空 code：{v}");
@@ -361,5 +393,9 @@ async fn unsigned_mcp_post_is_401(pool: sqlx::PgPool) {
         ))
         .unwrap();
     let resp = router.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "无签名 /mcp 应 401");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "无签名 /mcp 应 401"
+    );
 }

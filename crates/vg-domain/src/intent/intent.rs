@@ -228,7 +228,10 @@ impl IntentStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            IntentStatus::Confirmed | IntentStatus::Rejected | IntentStatus::Expired | IntentStatus::Cancelled
+            IntentStatus::Confirmed
+                | IntentStatus::Rejected
+                | IntentStatus::Expired
+                | IntentStatus::Cancelled
         )
     }
 }
@@ -435,10 +438,7 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
     }
 
-    fn sample(
-        action: IntentAction,
-        payload: serde_json::Value,
-    ) -> Result<Intent, DomainError> {
+    fn sample(action: IntentAction, payload: serde_json::Value) -> Result<Intent, DomainError> {
         Intent::new(
             IntentId::new("intent-001"),
             action,
@@ -472,7 +472,13 @@ mod tests {
             _ => {}
         }
         let path = [
-            Validated, Authorized, PolicyChecked, ProofRequired, Proved, Approved, Submitted,
+            Validated,
+            Authorized,
+            PolicyChecked,
+            ProofRequired,
+            Proved,
+            Approved,
+            Submitted,
             Confirmed,
         ];
         for step in path {
@@ -576,7 +582,9 @@ mod tests {
             IntentStatus::Submitted,
             IntentStatus::Confirmed,
         ] {
-            intent.advance(to).unwrap_or_else(|e| panic!("推进到 {to:?} 失败：{e}"));
+            intent
+                .advance(to)
+                .unwrap_or_else(|e| panic!("推进到 {to:?} 失败：{e}"));
         }
         assert_eq!(intent.status, IntentStatus::Confirmed);
         assert!(intent.status.is_terminal());
@@ -589,7 +597,9 @@ mod tests {
         intent.advance(IntentStatus::Validated).unwrap();
         intent.advance(IntentStatus::Authorized).unwrap();
         intent.advance(IntentStatus::PolicyChecked).unwrap();
-        intent.advance(IntentStatus::Approved).expect("直通分支应放行");
+        intent
+            .advance(IntentStatus::Approved)
+            .expect("直通分支应放行");
         assert_eq!(intent.status, IntentStatus::Approved);
         // 反向：Approved 不能回到 ProofRequired
         let mut i2 = sample(IntentAction::CreateBatch, json!({})).unwrap();
@@ -648,7 +658,10 @@ mod tests {
         }
         // 非终态集合恰好是其余 8 个
         assert_eq!(
-            IntentStatus::ALL.iter().filter(|s| !s.is_terminal()).count(),
+            IntentStatus::ALL
+                .iter()
+                .filter(|s| !s.is_terminal())
+                .count(),
             8
         );
     }
@@ -656,11 +669,18 @@ mod tests {
     #[test]
     fn submitted_cannot_cancel_but_can_reject_or_expire() {
         let mut intent = at_status(IntentStatus::Submitted);
-        assert!(intent.advance(IntentStatus::Cancelled).is_err(), "提交后不可取消");
+        assert!(
+            intent.advance(IntentStatus::Cancelled).is_err(),
+            "提交后不可取消"
+        );
         assert_eq!(intent.status, IntentStatus::Submitted);
-        intent.advance(IntentStatus::Rejected).expect("提交后仍可被拒绝");
+        intent
+            .advance(IntentStatus::Rejected)
+            .expect("提交后仍可被拒绝");
         let mut intent2 = at_status(IntentStatus::Submitted);
-        intent2.advance(IntentStatus::Expired).expect("提交后仍可过期");
+        intent2
+            .advance(IntentStatus::Expired)
+            .expect("提交后仍可过期");
     }
 
     // ---- 4. 风险分级 ----
@@ -693,7 +713,13 @@ mod tests {
 
     #[test]
     fn new_rejects_non_object_payload() {
-        for payload in [json!(42), json!("str"), json!([1, 2]), json!(null), json!(true)] {
+        for payload in [
+            json!(42),
+            json!("str"),
+            json!([1, 2]),
+            json!(null),
+            json!(true),
+        ] {
             let err = sample(IntentAction::CreateBatch, payload).unwrap_err();
             assert!(
                 matches!(err, DomainError::InvalidInput(ref m) if m.contains("payload")),
@@ -756,18 +782,22 @@ mod tests {
     #[test]
     fn reject_records_reason_and_is_gated_by_transition() {
         let mut intent = sample(IntentAction::CreateBatch, json!({})).unwrap();
-        intent
-            .reject("凭证缺失")
-            .expect("Created 可进入 Rejected");
+        intent.reject("凭证缺失").expect("Created 可进入 Rejected");
         assert_eq!(intent.status, IntentStatus::Rejected);
         assert_eq!(intent.rejection.as_deref(), Some("凭证缺失"));
         // 终态再 reject 拒绝
         assert!(intent.reject("再次拒绝").is_err());
-        assert_eq!(intent.rejection.as_deref(), Some("凭证缺失"), "原因不得被覆盖");
+        assert_eq!(
+            intent.rejection.as_deref(),
+            Some("凭证缺失"),
+            "原因不得被覆盖"
+        );
 
         // Submitted 仍可拒绝
         let mut submitted = at_status(IntentStatus::Submitted);
-        submitted.reject("账本拒绝").expect("Submitted 可进入 Rejected");
+        submitted
+            .reject("账本拒绝")
+            .expect("Submitted 可进入 Rejected");
         assert_eq!(submitted.rejection.as_deref(), Some("账本拒绝"));
 
         // Confirmed 终态不可 reject
@@ -810,7 +840,8 @@ mod tests {
         // 终态字段也参与 roundtrip
         let mut rejected = sample(IntentAction::MassRecall, json!({})).unwrap();
         rejected.reject("监管驳回").unwrap();
-        let back2: Intent = serde_json::from_str(&serde_json::to_string(&rejected).unwrap()).unwrap();
+        let back2: Intent =
+            serde_json::from_str(&serde_json::to_string(&rejected).unwrap()).unwrap();
         assert_eq!(back2, rejected);
     }
 

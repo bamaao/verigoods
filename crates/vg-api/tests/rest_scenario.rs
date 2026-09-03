@@ -17,10 +17,10 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 use vg_api::state::{AppState, NonceStore, SharedState};
 use vg_application::{AppDeps, HandlerMap, IntentEngine};
+use vg_domain::identity::ports::IdentityRepository;
 use vg_domain::identity::{Capability, DidDocument, KeyType, SubjectKind, VerificationMethod};
 use vg_domain::privacy::Note;
 use vg_domain::shared::{Did, Hash32, SubjectRef};
-use vg_domain::identity::ports::IdentityRepository;
 use vg_infra_crypto::KeyPair;
 use vg_infra_pg::*;
 
@@ -62,12 +62,8 @@ async fn seed_identity(
 ) -> KeyPair {
     let kp = KeyPair::generate();
     let did = Did::parse(&vg_infra_crypto::pubkey_to_did(kp.public())).unwrap();
-    let method = VerificationMethod::new(
-        "k-0",
-        KeyType::Secp256k1,
-        kp.pubkey_digest(),
-        did.clone(),
-    );
+    let method =
+        VerificationMethod::new("k-0", KeyType::Secp256k1, kp.pubkey_digest(), did.clone());
     let doc = DidDocument {
         did: did.clone(),
         kind,
@@ -114,23 +110,23 @@ impl Signer {
         let method_obj = Method::from_bytes(method.as_bytes()).unwrap();
         // 签名口径：不含 query 的纯路径；nonce 全局唯一（签名者前缀 + 递增）
         let pure_path = path.split('?').next().unwrap_or(path);
-        let nonce_str = format!("{}-{nonce}", &did_of(&self.kp)["did:vg:".len().."did:vg:".len() + 16]);
+        let nonce_str = format!(
+            "{}-{nonce}",
+            &did_of(&self.kp)["did:vg:".len().."did:vg:".len() + 16]
+        );
         let msg = vg_api::middleware::auth::sign_message(&method_obj, pure_path, ts, &nonce_str);
         let (sig, rid) = self.kp.sign_recoverable(msg.as_bytes()).unwrap();
         let mut s65 = [0u8; 65];
         s65[..64].copy_from_slice(&sig.to_bytes());
         s65[64] = 27 + u8::from(rid.is_y_odd());
-        let mut builder = Request::builder()
-            .method(method_obj)
-            .uri(path)
-            .header(
-                "VG-SIG",
-                format!(
-                    "did=\"{}\", sig=\"0x{}\", ts={ts}, nonce=\"{nonce_str}\"",
-                    did_of(&self.kp),
-                    hex::encode(s65)
-                ),
-            );
+        let mut builder = Request::builder().method(method_obj).uri(path).header(
+            "VG-SIG",
+            format!(
+                "did=\"{}\", sig=\"0x{}\", ts={ts}, nonce=\"{nonce_str}\"",
+                did_of(&self.kp),
+                hex::encode(s65)
+            ),
+        );
         let body = match body {
             Some(v) => {
                 builder = builder.header("content-type", "application/json");
@@ -149,8 +145,7 @@ impl Signer {
         let method_obj = Method::from_bytes(method.as_bytes()).unwrap();
         let pure_path = path.split('?').next().unwrap_or(path);
         let nonce_str = format!("rot-{nonce}");
-        let msg =
-            vg_api::middleware::auth::sign_message(&method_obj, pure_path, ts, &nonce_str);
+        let msg = vg_api::middleware::auth::sign_message(&method_obj, pure_path, ts, &nonce_str);
         let (sig, rid) = self.kp.sign_recoverable(msg.as_bytes()).unwrap();
         let mut s65 = [0u8; 65];
         s65[..64].copy_from_slice(&sig.to_bytes());
@@ -235,10 +230,19 @@ async fn full_lifecycle_scenario(pool: sqlx::PgPool) {
     assert_eq!(s, StatusCode::CREATED, "首次 DID 注册应 201");
     let (s, v) = send(
         &router,
-        Signer::request(&Signer::new(KeyPair::generate()), "POST", "/api/v1/dids", Some(doc_b)),
+        Signer::request(
+            &Signer::new(KeyPair::generate()),
+            "POST",
+            "/api/v1/dids",
+            Some(doc_b),
+        ),
     )
     .await;
-    assert_eq!(s, StatusCode::CONFLICT, "重复注册应 409（insert-only 防劫持）：{v}");
+    assert_eq!(
+        s,
+        StatusCode::CONFLICT,
+        "重复注册应 409（insert-only 防劫持）：{v}"
+    );
     // did 与首个验证方法公钥摘要不一致 → 400（自派生绑定，防抢注）
     let other = KeyPair::generate();
     let hijack = json!({
@@ -252,10 +256,19 @@ async fn full_lifecycle_scenario(pool: sqlx::PgPool) {
     });
     let (s, v) = send(
         &router,
-        Signer::request(&Signer::new(KeyPair::generate()), "POST", "/api/v1/dids", Some(hijack)),
+        Signer::request(
+            &Signer::new(KeyPair::generate()),
+            "POST",
+            "/api/v1/dids",
+            Some(hijack),
+        ),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "did 与公钥摘要不一致应 400：{v}");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "did 与公钥摘要不一致应 400：{v}"
+    );
 
     // GET /dids/{did}（需签）
     let (s, v) = send(
@@ -279,17 +292,9 @@ async fn full_lifecycle_scenario(pool: sqlx::PgPool) {
     .await;
     assert_eq!(s, StatusCode::CREATED, "产品建档应 201：{v}");
     // GET /products/{id}
-    let (s, _) = send(
-        &router,
-        a.request("GET", "/api/v1/products/pd-milk", None),
-    )
-    .await;
+    let (s, _) = send(&router, a.request("GET", "/api/v1/products/pd-milk", None)).await;
     assert_eq!(s, StatusCode::OK);
-    let (s, _) = send(
-        &router,
-        a.request("GET", "/api/v1/products/none", None),
-    )
-    .await;
+    let (s, _) = send(&router, a.request("GET", "/api/v1/products/none", None)).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 
     // 建批次（Created，无 target_state）→ Confirmed
@@ -369,7 +374,10 @@ async fn full_lifecycle_scenario(pool: sqlx::PgPool) {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "转移应 200：{v}");
-    assert_eq!(v["status"], "confirmed", "公开转移 L3 无停门（仅 shielded 有），应 Confirmed：{v}");
+    assert_eq!(
+        v["status"], "confirmed",
+        "公开转移 L3 无停门（仅 shielded 有），应 Confirmed：{v}"
+    );
     let transfer_intent = v["intent_id"].as_str().unwrap().to_owned();
 
     // GET /transfers?subject=batch:bt-001（query 字符串口径）
@@ -385,11 +393,7 @@ async fn full_lifecycle_scenario(pool: sqlx::PgPool) {
     assert_eq!(records[0]["to"].as_str().unwrap(), did_b);
 
     // 批次聚合视图（owner 换手 + counters）
-    let (s, v) = send(
-        &router,
-        a.request("GET", "/api/v1/batches/bt-001", None),
-    )
-    .await;
+    let (s, v) = send(&router, a.request("GET", "/api/v1/batches/bt-001", None)).await;
     assert_eq!(s, StatusCode::OK, "批次聚合应 200：{v}");
     assert_eq!(v["owner"].as_str().unwrap(), did_b, "所有权应已转移给 B");
     assert_eq!(v["transfer_count"], 1);
@@ -404,8 +408,14 @@ async fn full_lifecycle_scenario(pool: sqlx::PgPool) {
     .await;
     assert_eq!(s, StatusCode::OK, "intent 详情应 200：{v}");
     assert_eq!(v["status"], "confirmed");
-    assert!(v["result_ref"].is_string(), "Confirmed 后 result_ref 应非空：{v}");
-    assert!(v["payload"]["old_note"].is_null(), "非 shielded intent 不做脱敏");
+    assert!(
+        v["result_ref"].is_string(),
+        "Confirmed 后 result_ref 应非空：{v}"
+    );
+    assert!(
+        v["payload"]["old_note"].is_null(),
+        "非 shielded intent 不做脱敏"
+    );
 
     // compliance GET：无策略 → 无缺失 → compliant
     let (s, v) = send(
@@ -473,7 +483,9 @@ async fn unsigned_write_is_401(pool: sqlx::PgPool) {
             .method(Method::POST)
             .uri("/api/v1/transfers")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"subject":{"type":"batch","id":"x"},"to":"did:vg:b","c2c":false}"#))
+            .body(Body::from(
+                r#"{"subject":{"type":"batch","id":"x"},"to":"did:vg:b","c2c":false}"#,
+            ))
             .unwrap(),
     )
     .await;
@@ -524,17 +536,17 @@ async fn policy_roundtrip_and_anchor(pool: sqlx::PgPool) {
         "expires_at": null,
         "active": true
     });
-    let (s, v) = send(
-        &router,
-        r.request("POST", "/api/v1/policies", Some(body)),
-    )
-    .await;
+    let (s, v) = send(&router, r.request("POST", "/api/v1/policies", Some(body))).await;
     assert_eq!(s, StatusCode::CREATED, "策略注册应 201：{v}");
 
     // 候选查询（辖区 + 类目）
     let (s, v) = send(
         &router,
-        r.request("GET", "/api/v1/policies?jurisdiction=cn&product_type=milk", None),
+        r.request(
+            "GET",
+            "/api/v1/policies?jurisdiction=cn&product_type=milk",
+            None,
+        ),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "策略列表应 200：{v}");
@@ -560,12 +572,11 @@ async fn policy_roundtrip_and_anchor(pool: sqlx::PgPool) {
     assert_eq!(s, StatusCode::NOT_FOUND);
 
     // 账本锚定断言：policy_registered 分录已落 ledger_anchors
-    let anchored: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM ledger_anchors WHERE kind = 'policy_registered'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let anchored: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM ledger_anchors WHERE kind = 'policy_registered'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(anchored, 1, "策略注册应锚定一条 policy_registered 分录");
 }
 
@@ -596,7 +607,8 @@ async fn shielded_transfer_gate_approve_and_intent_sanitization(pool: sqlx::PgPo
     let ot_addr = Hash32::from_bytes(vg_infra_crypto::keccak256(b"ot-addr"));
     let subject = SubjectRef::Batch(vg_domain::shared::BatchId::new("bt-shield"));
     let note = Note::new(subject.clone(), ot_addr, 7, secret, salt).unwrap();
-    let commitment = note.commitment(&vg_infra_crypto::PoseidonNoteHasher as &dyn vg_domain::ports::NoteHasher);
+    let commitment =
+        note.commitment(&vg_infra_crypto::PoseidonNoteHasher as &dyn vg_domain::ports::NoteHasher);
     sqlx::query(
         "INSERT INTO notes (commitment, asset_ref, owner_ot_addr, amount, addr_point, \
          ephemeral, secret, salt) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -649,22 +661,28 @@ async fn shielded_transfer_gate_approve_and_intent_sanitization(pool: sqlx::PgPo
     .await;
     assert_eq!(status, StatusCode::OK);
     let old_note = &v["payload"]["old_note"];
-    assert!(old_note.get("secret").is_none(), "secret 必须被擦除：{old_note}");
-    assert!(old_note.get("salt").is_none(), "salt 必须被擦除：{old_note}");
+    assert!(
+        old_note.get("secret").is_none(),
+        "secret 必须被擦除：{old_note}"
+    );
+    assert!(
+        old_note.get("salt").is_none(),
+        "salt 必须被擦除：{old_note}"
+    );
     assert_eq!(old_note["amount"], 7, "非敏感字段保留");
 
     // 未知 intent 404
-    let (status, _) = send(
-        &router,
-        s.request("GET", "/api/v1/intents/it-none", None),
-    )
-    .await;
+    let (status, _) = send(&router, s.request("GET", "/api/v1/intents/it-none", None)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     // approve（body 可空）：监管方签名 → 续跑 → Confirmed
     let (status, v) = send(
         &router,
-        r.request("POST", &format!("/api/v1/intents/{intent_id}/approve"), Some(json!({}))),
+        r.request(
+            "POST",
+            &format!("/api/v1/intents/{intent_id}/approve"),
+            Some(json!({})),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "approve 应 200：{v}");
@@ -943,10 +961,8 @@ async fn concurrent_did_register_exactly_one_wins(pool: sqlx::PgPool) {
             .unwrap()
     };
     // 免签白名单端点：并发双发（两个 oneshot 同时 poll）
-    let ((s1, v1), (s2, v2)) = tokio::join!(
-        send(&router, post(doc_a)),
-        send(&router, post(doc_b)),
-    );
+    let ((s1, v1), (s2, v2)) =
+        tokio::join!(send(&router, post(doc_a)), send(&router, post(doc_b)),);
     let mut statuses = vec![s1, s2];
     statuses.sort();
     assert_eq!(
@@ -961,7 +977,11 @@ async fn concurrent_did_register_exactly_one_wins(pool: sqlx::PgPool) {
     } else {
         &extra_b
     };
-    let winner_extra_id = if s1 == StatusCode::CREATED { "k-1" } else { "k-2" };
+    let winner_extra_id = if s1 == StatusCode::CREATED {
+        "k-1"
+    } else {
+        "k-2"
+    };
     let repo = PgIdentityRepo;
     let mut tx = pool.begin().await.unwrap();
     let found = repo
@@ -970,11 +990,8 @@ async fn concurrent_did_register_exactly_one_wins(pool: sqlx::PgPool) {
         .unwrap()
         .expect("并发注册后文档应存在");
     tx.commit().await.unwrap();
-    let extras: Vec<&vg_domain::identity::VerificationMethod> = found
-        .methods
-        .iter()
-        .filter(|m| m.id != "k-0")
-        .collect();
+    let extras: Vec<&vg_domain::identity::VerificationMethod> =
+        found.methods.iter().filter(|m| m.id != "k-0").collect();
     assert_eq!(
         extras.len(),
         1,
@@ -1029,11 +1046,7 @@ async fn revoked_decoy_did_squatting_is_400(pool: sqlx::PgPool) {
     assert_eq!(s, StatusCode::BAD_REQUEST, "revoked 诱饵抢注应 400：{v}");
 
     // 合法注册（首个未撤销方法派生）仍然 201 —— 过滤 revoked 不误伤
-    let honest = register_doc(
-        &did_of(&attacker),
-        &attacker.pubkey_digest().as_hex(),
-        None,
-    );
+    let honest = register_doc(&did_of(&attacker), &attacker.pubkey_digest().as_hex(), None);
     let (s, v) = send(
         &router,
         Request::builder()
@@ -1066,12 +1079,12 @@ async fn agent_without_parent_is_400_on_register_and_update(pool: sqlx::PgPool) 
         "created_at": Utc::now().to_rfc3339(),
     });
     let anon = Signer::new(KeyPair::generate()); // 免签端点，签名头不校验
-    let (s, v) = send(
-        &router,
-        anon.request("POST", "/api/v1/dids", Some(doc)),
-    )
-    .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "无 parent 的 Agent 注册应 400：{v}");
+    let (s, v) = send(&router, anon.request("POST", "/api/v1/dids", Some(doc))).await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "无 parent 的 Agent 注册应 400：{v}"
+    );
     assert_eq!(v["code"], "invalid_input");
 
     // PUT 同样生效：已存在主体签名 PUT 一个缺 parent 的 Agent 文档 → 400
@@ -1089,7 +1102,11 @@ async fn agent_without_parent_is_400_on_register_and_update(pool: sqlx::PgPool) 
     });
     let e = Signer::new(ent);
     let (s, v) = send(&router, e.request("PUT", "/api/v1/dids", Some(bad_put))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "PUT 无 parent 的 Agent 应 400：{v}");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "PUT 无 parent 的 Agent 应 400：{v}"
+    );
 }
 
 // ---------- 安全回归：管理端点 Regulator 粗粒度校验 ----------

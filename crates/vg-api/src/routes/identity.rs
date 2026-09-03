@@ -29,7 +29,8 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
-use vg_domain::identity::DidDocument;use vg_domain::shared::{Did, DomainError};
+use vg_domain::identity::DidDocument;
+use vg_domain::shared::{Did, DomainError};
 
 use crate::error::ApiError;
 use crate::middleware::auth::AuthedDid;
@@ -48,7 +49,9 @@ fn ensure_self_derived(doc: &DidDocument) -> Result<(), ApiError> {
         .filter(|m| !m.revoked)
         .min_by(|a, b| a.id.cmp(&b.id))
         .ok_or_else(|| {
-            ApiError::bad_request("DID 文档必须至少包含一个未撤销的验证方法（methods 不能为空且不得全部撤销）")
+            ApiError::bad_request(
+                "DID 文档必须至少包含一个未撤销的验证方法（methods 不能为空且不得全部撤销）",
+            )
         })?;
     let derived = format!("did:vg:{}", first.public_key.as_hex());
     if doc.did.as_str() != derived {
@@ -65,11 +68,10 @@ fn ensure_self_derived(doc: &DidDocument) -> Result<(), ApiError> {
 /// 是资源写入语义（非鉴权失败，默认映射 401 不当），故此处重包装为
 /// `InvalidInput` → 400（MEMORY Task 23 备忘：映射层区分）。
 fn validate_doc(doc: &DidDocument) -> Result<(), ApiError> {
-    doc.validate()
-        .map_err(|e| match e {
-            DomainError::Unauthorized(msg) => DomainError::InvalidInput(msg),
-            other => other,
-        })?;
+    doc.validate().map_err(|e| match e {
+        DomainError::Unauthorized(msg) => DomainError::InvalidInput(msg),
+        other => other,
+    })?;
     Ok(())
 }
 

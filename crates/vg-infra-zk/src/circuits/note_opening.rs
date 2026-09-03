@@ -558,7 +558,7 @@ mod tests {
     use vg_infra_crypto::poseidon::poseidon_note_commitment;
 
     /// 黄金 Note 的 6 词前像（与 vg-domain 黄金向量一致，hex 字面复刻；
-/// 与 vg-infra-crypto fixture 逐字一致）。
+    /// 与 vg-infra-crypto fixture 逐字一致）。
     fn golden_parts() -> Vec<[u8; 32]> {
         let word = |hex: &str| -> [u8; 32] { hex::decode(hex).unwrap().try_into().unwrap() };
         vec![
@@ -737,10 +737,7 @@ mod tests {
         let result = std::panic::catch_unwind(|| {
             check_constraints(&air, &trace, &publics);
         });
-        assert!(
-            result.is_err(),
-            "t≡1 单行伪证必须被首行 t=0 约束拒绝"
-        );
+        assert!(result.is_err(), "t≡1 单行伪证必须被首行 t=0 约束拒绝");
     }
 
     /// 对照组：诚实 witness 必须通过同一条 debug 约束校验路径。

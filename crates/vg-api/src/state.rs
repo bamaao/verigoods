@@ -37,7 +37,11 @@ impl NonceStore {
         }
         if seen.len() >= NONCE_CAPACITY {
             // 删除 ts 最小的条目（首次命中即删，容量恒 ≤ 上限）
-            if let Some(oldest) = seen.iter().min_by_key(|(_, ts)| **ts).map(|(k, _)| k.clone()) {
+            if let Some(oldest) = seen
+                .iter()
+                .min_by_key(|(_, ts)| **ts)
+                .map(|(k, _)| k.clone())
+            {
                 seen.remove(&oldest);
             }
         }

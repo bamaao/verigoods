@@ -30,9 +30,7 @@
 //! - verify 侧对合法路由的电路永不 Err（解码失败等返回 `Ok(false)`）。
 
 use async_trait::async_trait;
-use vg_domain::ports::{
-    CircuitSpec, FieldElement, ProofBundle, ProofProver, Witness,
-};
+use vg_domain::ports::{CircuitSpec, FieldElement, ProofBundle, ProofProver, Witness};
 use vg_domain::shared::DomainError;
 #[cfg(any(test, feature = "test-util"))]
 use vg_infra_crypto::keccak256;
@@ -145,11 +143,7 @@ impl ProofProver for ProverDispatcher {
                         "note_opening 公开输入必须为 C 的 8 个 limb".into(),
                     ));
                 }
-                let parts: Vec<[u8; 32]> = witness
-                    .secrets
-                    .iter()
-                    .map(|w| *w.as_bytes())
-                    .collect();
+                let parts: Vec<[u8; 32]> = witness.secrets.iter().map(|w| *w.as_bytes()).collect();
                 let output = prove_note_opening(&parts).map_err(map_zk_error)?;
                 let publics = limbs_to_fes(&output.public_limbs);
                 check_publics(circuit, &output.public_limbs, &circuit.public_inputs)?;
@@ -351,8 +345,12 @@ impl ProofProver for TransparentProver {
         circuit: &CircuitSpec,
         witness: &Witness,
     ) -> Result<ProofBundle, DomainError> {
-        let canonical =
-            Self::canonical(&circuit.id, circuit.version, &circuit.public_inputs, &witness.secrets);
+        let canonical = Self::canonical(
+            &circuit.id,
+            circuit.version,
+            &circuit.public_inputs,
+            &witness.secrets,
+        );
         let digest = keccak256(&canonical);
         let mut proof = digest.to_vec();
         for s in &witness.secrets {
@@ -375,8 +373,12 @@ impl ProofProver for TransparentProver {
             .chunks_exact(32)
             .map(|c| FieldElement::from_bytes(c.try_into().expect("chunks_exact 保证 32 字节")))
             .collect();
-        let canonical =
-            Self::canonical(&bundle.circuit_id, bundle.version, &bundle.publics, &secrets);
+        let canonical = Self::canonical(
+            &bundle.circuit_id,
+            bundle.version,
+            &bundle.publics,
+            &secrets,
+        );
         Ok(keccak256(&canonical) == digest)
     }
 }
@@ -492,7 +494,8 @@ mod tests {
             assert_eq!(bundle.version, spec.version);
             assert_eq!(bundle.publics, spec.public_inputs);
             assert!(
-                d.verify(&bundle).unwrap_or_else(|e| panic!("{} verify 应成功：{e}", spec.id)),
+                d.verify(&bundle)
+                    .unwrap_or_else(|e| panic!("{} verify 应成功：{e}", spec.id)),
                 "{} 证明 verify 必须 true",
                 spec.id
             );
@@ -574,8 +577,7 @@ mod tests {
         // 篡改第一个公开 limb（承诺不一致）
         let first = u32_to_fe(0x1234_5678);
         spec.public_inputs[0] = first;
-        let err = block_on(d.prove(&spec, &witness))
-            .expect_err("公开输入与承诺不一致必须被拒绝");
+        let err = block_on(d.prove(&spec, &witness)).expect_err("公开输入与承诺不一致必须被拒绝");
         assert!(matches!(err, DomainError::InvalidInput(_)));
     }
 
@@ -600,7 +602,10 @@ mod tests {
         misrouted.version = RANGE_CHECK_CIRCUIT_VERSION;
         misrouted.publics.push(u32_fe(0));
         misrouted.publics.push(u32_fe(0));
-        assert!(!d.verify(&misrouted).unwrap_or(false), "跨电路 proof 必须 false");
+        assert!(
+            !d.verify(&misrouted).unwrap_or(false),
+            "跨电路 proof 必须 false"
+        );
     }
 
     #[test]

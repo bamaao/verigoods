@@ -6,7 +6,7 @@
 //! `400 invalid_input`，与其他框架层错误同构。
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Request, Json};
+use axum::extract::{FromRequest, Json, Request};
 
 use crate::error::ApiError;
 
@@ -28,7 +28,9 @@ where
             Err(rejection) => {
                 // 统一 JSON 错误体（400 invalid_input）；rejection 的 Display
                 // 携带 axum 的具体解析原因（语法错/类型不匹配/长度超限等）
-                Err(ApiError::bad_request(format!("请求体 JSON 解析失败：{rejection}")))
+                Err(ApiError::bad_request(format!(
+                    "请求体 JSON 解析失败：{rejection}"
+                )))
             }
         }
     }
@@ -67,7 +69,10 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["code"], "invalid_input", "错误体应为统一 code：{v}");
         assert!(
-            v["message"].as_str().unwrap().contains("请求体 JSON 解析失败"),
+            v["message"]
+                .as_str()
+                .unwrap()
+                .contains("请求体 JSON 解析失败"),
             "message 应说明解析失败：{v}"
         );
     }
@@ -105,10 +110,7 @@ mod tests {
         struct Dto {
             a: i64,
         }
-        let router = Router::new().route(
-            "/dto",
-            post(|AppJson(_v): AppJson<Dto>| async { "ok" }),
-        );
+        let router = Router::new().route("/dto", post(|AppJson(_v): AppJson<Dto>| async { "ok" }));
         let resp = router
             .oneshot(
                 axum::http::Request::builder()

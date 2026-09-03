@@ -12,10 +12,7 @@ use crate::state::SharedState;
 
 /// 健康检查：DB 可达 200 `{"status":"ok"}`，不可达 503 `{"status":"degraded"}`。
 pub async fn health(State(state): State<SharedState>) -> Response {
-    let db_ok = sqlx::query("SELECT 1")
-        .execute(&state.pool)
-        .await
-        .is_ok();
+    let db_ok = sqlx::query("SELECT 1").execute(&state.pool).await.is_ok();
     if db_ok {
         (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
     } else {

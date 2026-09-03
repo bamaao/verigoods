@@ -68,13 +68,11 @@ impl CommodityRepository for PgCommodityRepo {
         ctx: &mut Self::Context,
         id: &ProductId,
     ) -> Result<Option<ProductType>, DomainError> {
-        let row = sqlx::query(
-            "SELECT category, metadata_hash, active FROM products WHERE id = $1",
-        )
-        .bind(id.as_ref())
-        .fetch_optional(&mut **ctx)
-        .await
-        .map_err(storage)?;
+        let row = sqlx::query("SELECT category, metadata_hash, active FROM products WHERE id = $1")
+            .bind(id.as_ref())
+            .fetch_optional(&mut **ctx)
+            .await
+            .map_err(storage)?;
         Ok(row
             .map(|r| {
                 Ok(ProductType {
@@ -402,7 +400,9 @@ mod tests {
         let mut tx = pool.begin().await.unwrap();
 
         let p = sample_product("p-16");
-        repo.save_product(&mut tx, &p).await.expect("保存商品应成功");
+        repo.save_product(&mut tx, &p)
+            .await
+            .expect("保存商品应成功");
         assert_eq!(
             repo.find_product(&mut tx, &p.id).await.unwrap(),
             Some(p.clone()),
@@ -415,14 +415,16 @@ mod tests {
         updated.category = "cold_chain".into();
         updated.metadata_hash = Hash32::keccak(b"meta-16-v2");
         repo.save_product(&mut tx, &updated).await.unwrap();
-        assert_eq!(repo.find_product(&mut tx, &p.id).await.unwrap(), Some(updated));
-
-        assert!(
-            repo.find_product(&mut tx, &ProductId::new("p-none"))
-                .await
-                .unwrap()
-                .is_none()
+        assert_eq!(
+            repo.find_product(&mut tx, &p.id).await.unwrap(),
+            Some(updated)
         );
+
+        assert!(repo
+            .find_product(&mut tx, &ProductId::new("p-none"))
+            .await
+            .unwrap()
+            .is_none());
 
         tx.commit().await.unwrap();
     }
@@ -547,14 +549,9 @@ mod tests {
         let batch = sample_batch("b-state", 5);
         repo.save_batch(&mut tx, &batch).await.unwrap();
 
-        repo.update_batch_state(
-            &mut tx,
-            &batch.id,
-            LifecycleState::Produced,
-            batch.active,
-        )
-        .await
-        .expect("状态更新应成功");
+        repo.update_batch_state(&mut tx, &batch.id, LifecycleState::Produced, batch.active)
+            .await
+            .expect("状态更新应成功");
         let stored = repo.find_batch(&mut tx, &batch.id).await.unwrap().unwrap();
         assert_eq!(stored.state, LifecycleState::Produced);
         assert!(stored.active);
@@ -598,13 +595,22 @@ mod tests {
             .await
             .expect("合规回写应成功");
         assert!(
-            repo.find_batch(&mut tx, &batch.id).await.unwrap().unwrap().compliance_ok
+            repo.find_batch(&mut tx, &batch.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .compliance_ok
         );
         repo.update_batch_compliance(&mut tx, &batch.id, false)
             .await
             .unwrap();
         assert!(
-            !repo.find_batch(&mut tx, &batch.id).await.unwrap().unwrap().compliance_ok
+            !repo
+                .find_batch(&mut tx, &batch.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .compliance_ok
         );
 
         let err = repo
@@ -635,7 +641,10 @@ mod tests {
         )
         .unwrap();
         repo.save_asset(&mut tx, &asset).await.unwrap();
-        assert_eq!(repo.find_asset(&mut tx, &asset.id).await.unwrap(), Some(asset.clone()));
+        assert_eq!(
+            repo.find_asset(&mut tx, &asset.id).await.unwrap(),
+            Some(asset.clone())
+        );
 
         // 模拟所有权上下文回填计数：改计数再 save 再 find
         let mut updated = asset;
@@ -651,12 +660,11 @@ mod tests {
         assert_eq!((stored.transfer_count, stored.c2c_count), (3, 2));
         assert_eq!(stored.state, LifecycleState::Sold);
 
-        assert!(
-            repo.find_asset(&mut tx, &AssetId::new("a-none"))
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(repo
+            .find_asset(&mut tx, &AssetId::new("a-none"))
+            .await
+            .unwrap()
+            .is_none());
 
         tx.commit().await.unwrap();
     }

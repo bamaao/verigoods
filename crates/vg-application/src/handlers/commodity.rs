@@ -145,7 +145,14 @@ impl IntentHandler for CreateBatchHandler {
         if let Some(target) = payload.target_state {
             let from = vg_domain::lifecycle::LifecycleState::Created;
             record_lifecycle_transition(
-                deps, tx, &payload.subject, from, target, &intent.id, &enforced, now,
+                deps,
+                tx,
+                &payload.subject,
+                from,
+                target,
+                &intent.id,
+                &enforced,
+                now,
             )
             .await?;
         }
@@ -359,8 +366,7 @@ impl IntentHandler for MergeBatchHandler {
             );
             // 授权闸门（对每个父批）：合并会吞噬父批所有权——任一父批
             // 不属于 effective principal 即整体拒绝，不得借合并吞他人批次。
-            let owner =
-                require_owner(deps, tx, intent, &SubjectRef::Batch(id.clone())).await?;
+            let owner = require_owner(deps, tx, intent, &SubjectRef::Batch(id.clone())).await?;
             if new_owner.is_none() {
                 new_owner = Some(owner);
             }

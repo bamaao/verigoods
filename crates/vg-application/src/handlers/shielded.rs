@@ -116,12 +116,11 @@ impl MetaSpec {
 
 /// hex 字符串 → 定长字节（错误携带字段名）。
 fn decode_fixed<const N: usize>(hex_str: &str, what: &str) -> Result<[u8; N], DomainError> {
-    let bytes = hex::decode(hex_str).map_err(|e| {
-        DomainError::InvalidInput(format!("{what} 非法 hex：{e}"))
-    })?;
-    bytes.try_into().map_err(|_| {
-        DomainError::InvalidInput(format!("{what} 必须为 {N} 字节 hex"))
-    })
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| DomainError::InvalidInput(format!("{what} 非法 hex：{e}")))?;
+    bytes
+        .try_into()
+        .map_err(|_| DomainError::InvalidInput(format!("{what} 必须为 {N} 字节 hex")))
 }
 
 /// ShieldedTransfer 处理器（L3：监管副签审批门）。
@@ -146,9 +145,7 @@ impl IntentHandler for ShieldedTransferHandler {
         // from_did 必须等于 effective principal（代理时为被代理主体）。
         let effective = intent.on_behalf_of.as_ref().unwrap_or(&intent.actor);
         if payload.from_did != *effective {
-            return Err(DomainError::InvalidInput(
-                "from_did 必须为操作主体".into(),
-            ));
+            return Err(DomainError::InvalidInput("from_did 必须为操作主体".into()));
         }
 
         // Phase1：全额转移（无找零）——金额必须与旧 Note 一致。
@@ -317,26 +314,22 @@ impl IntentHandler for ShieldedTransferHandler {
         .await
         .map_err(|e| map_write_err(e, WriteTable::Notes))?;
 
-        sqlx::query(
-            "INSERT INTO nullifiers (nf, spent_at, intent_id) VALUES ($1, $2, $3)",
-        )
-        .bind(old_nullifier.as_bytes().as_slice())
-        .bind(now)
-        .bind(intent.id.as_ref())
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| map_write_err(e, WriteTable::Nullifiers))?;
+        sqlx::query("INSERT INTO nullifiers (nf, spent_at, intent_id) VALUES ($1, $2, $3)")
+            .bind(old_nullifier.as_bytes().as_slice())
+            .bind(now)
+            .bind(intent.id.as_ref())
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| map_write_err(e, WriteTable::Nullifiers))?;
 
-        sqlx::query(
-            "INSERT INTO shielded_txs (nf, commitment, extra, at) VALUES ($1, $2, $3, $4)",
-        )
-        .bind(old_nullifier.as_bytes().as_slice())
-        .bind(new_commitment.as_bytes().as_slice())
-        .bind(extra.as_slice())
-        .bind(now)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| map_write_err(e, WriteTable::ShieldedTxs))?;
+        sqlx::query("INSERT INTO shielded_txs (nf, commitment, extra, at) VALUES ($1, $2, $3, $4)")
+            .bind(old_nullifier.as_bytes().as_slice())
+            .bind(new_commitment.as_bytes().as_slice())
+            .bind(extra.as_slice())
+            .bind(now)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| map_write_err(e, WriteTable::ShieldedTxs))?;
 
         // 不发领域事件（隐私语义，见模块 doc）。
 
@@ -422,11 +415,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use vg_domain::identity::ports::IdentityRepository;
-    use vg_domain::identity::{
-        Capability, DidDocument, KeyType, SubjectKind, VerificationMethod,
-    };
     use crate::intent_engine::RawIntent;
+    use vg_domain::identity::ports::IdentityRepository;
+    use vg_domain::identity::{Capability, DidDocument, KeyType, SubjectKind, VerificationMethod};
     use vg_domain::shared::{Did, IntentId};
     use vg_infra_crypto::{KeyPair, PoseidonNoteHasher};
     use vg_infra_pg::{
@@ -521,7 +512,10 @@ mod tests {
             .await
             .unwrap();
         identity
-            .save_document(&mut tx, &doc(recipient_did.clone(), SubjectKind::Enterprise))
+            .save_document(
+                &mut tx,
+                &doc(recipient_did.clone(), SubjectKind::Enterprise),
+            )
             .await
             .unwrap();
         identity
@@ -640,7 +634,12 @@ mod tests {
 
         // 首跑：停在 L3 审批门（零业务写入）
         let r1 = eng
-            .execute(raw("st-1", &p.sender_did, shielded_payload(&p, &subject, &old), 1))
+            .execute(raw(
+                "st-1",
+                &p.sender_did,
+                shielded_payload(&p, &subject, &old),
+                1,
+            ))
             .await
             .unwrap();
         assert_eq!(r1.status, IntentStatus::PolicyChecked);
@@ -680,13 +679,12 @@ mod tests {
         assert_eq!(note_row.1, 10);
         assert_eq!(note_row.2, 33);
         assert_eq!(note_row.3, 33);
-        let created_tx: (String,) = sqlx::query_as(
-            "SELECT created_tx FROM notes WHERE commitment = decode($1, 'hex')",
-        )
-        .bind(&commitment_hex)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let created_tx: (String,) =
+            sqlx::query_as("SELECT created_tx FROM notes WHERE commitment = decode($1, 'hex')")
+                .bind(&commitment_hex)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(created_tx.0, "st-1");
 
         // nullifiers / shielded_txs（extra 非空）
@@ -707,12 +705,11 @@ mod tests {
         assert!(tx_row.0 > 0, "ExtraData 密文非空");
 
         // proofs：note_opening 且 verified
-        let proof_row: (String, bool) = sqlx::query_as(
-            "SELECT circuit_id, verified FROM proofs WHERE proof_id = 'pf:st-1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let proof_row: (String, bool) =
+            sqlx::query_as("SELECT circuit_id, verified FROM proofs WHERE proof_id = 'pf:st-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(proof_row.0, "note_opening");
         assert!(proof_row.1);
 
@@ -743,13 +740,10 @@ mod tests {
         assert_eq!(events.0, 0);
 
         // ---- 接收方可扫到（恰一张，t 非空）----
-        let scanned = services::shielded::scan_notes(
-            &deps(pool.clone()),
-            &p.view_priv_hex,
-            &p.spend_pub_hex,
-        )
-        .await
-        .unwrap();
+        let scanned =
+            services::shielded::scan_notes(&deps(pool.clone()), &p.view_priv_hex, &p.spend_pub_hex)
+                .await
+                .unwrap();
         assert!(
             scanned.len() == 1,
             "接收方扫描应恰命中新 Note（旧 Note 属发送方），实际 {}",
@@ -777,15 +771,13 @@ mod tests {
         }
 
         // ---- 监管可解 ----
-        let extra: (Vec<u8>,) = sqlx::query_as(
-            "SELECT extra FROM shielded_txs WHERE commitment = decode($1, 'hex')",
-        )
-        .bind(&commitment_hex)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        let plain =
-            services::shielded::regulator_decrypt(&extra.0, &p.reg_view_priv_hex).unwrap();
+        let extra: (Vec<u8>,) =
+            sqlx::query_as("SELECT extra FROM shielded_txs WHERE commitment = decode($1, 'hex')")
+                .bind(&commitment_hex)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let plain = services::shielded::regulator_decrypt(&extra.0, &p.reg_view_priv_hex).unwrap();
         assert_eq!(plain["from"], serde_json::json!(p.sender_did.as_str()));
         assert_eq!(plain["to"], serde_json::json!(p.recipient_did.as_str()));
         assert_eq!(plain["asset"], serde_json::json!("batch:bt-shield-1"));
@@ -848,7 +840,12 @@ mod tests {
         };
         let eng = engine(pool.clone());
         let r = eng
-            .execute(raw("mn-1", &p.sender_did, shielded_payload(&p, &subject, &fake), 1))
+            .execute(raw(
+                "mn-1",
+                &p.sender_did,
+                shielded_payload(&p, &subject, &fake),
+                1,
+            ))
             .await
             .unwrap();
         assert_eq!(r.status, IntentStatus::Rejected);
@@ -1014,11 +1011,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status, IntentStatus::Rejected);
-        assert!(
-            r.rejection
-                .as_deref()
-                .is_some_and(|x| x.contains("全额转移"))
-        );
+        assert!(r
+            .rejection
+            .as_deref()
+            .is_some_and(|x| x.contains("全额转移")));
     }
 
     /// 扫描不命中：他人 view 私钥扫不出任何 Note。
@@ -1082,12 +1078,11 @@ mod tests {
         assert_eq!(r1, expect);
         assert_eq!(r1, r2, "幂等：同 batch_ref 二次提交返回既有根");
 
-        let rows: (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM validium_batches WHERE batch_ref = 'br-1'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let rows: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM validium_batches WHERE batch_ref = 'br-1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(rows.0, 1, "库不重复");
         let anchors: (i64,) =
             sqlx::query_as("SELECT count(*) FROM ledger_anchors WHERE kind = 'state_root'")
@@ -1112,12 +1107,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(empty, Hash32::ZERO);
-        let empty_rows: (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM validium_batches WHERE batch_ref = 'br-empty'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let empty_rows: (i64,) =
+            sqlx::query_as("SELECT count(*) FROM validium_batches WHERE batch_ref = 'br-empty'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(empty_rows.0, 0, "空集不得落库");
         let anchors_after: (i64,) =
             sqlx::query_as("SELECT count(*) FROM ledger_anchors WHERE kind = 'state_root'")
@@ -1149,11 +1143,10 @@ mod tests {
         services::validium::grant_data_access(&d, &regulator, "coldchain:cn-2026", t2)
             .await
             .unwrap();
-        let refreshed =
-            services::validium::data_access_until(&d, &regulator, "coldchain:cn-2026")
-                .await
-                .unwrap()
-                .expect("授权行应存在");
+        let refreshed = services::validium::data_access_until(&d, &regulator, "coldchain:cn-2026")
+            .await
+            .unwrap()
+            .expect("授权行应存在");
         assert!((refreshed - t2).abs() < chrono::Duration::milliseconds(1));
         assert!(refreshed > stored, "刷新后截止时刻应延后");
 
@@ -1162,11 +1155,10 @@ mod tests {
         services::validium::grant_data_access(&d, &regulator, "coldchain:cn-2026", earlier)
             .await
             .unwrap();
-        let shrunk =
-            services::validium::data_access_until(&d, &regulator, "coldchain:cn-2026")
-                .await
-                .unwrap()
-                .expect("授权行应存在");
+        let shrunk = services::validium::data_access_until(&d, &regulator, "coldchain:cn-2026")
+            .await
+            .unwrap()
+            .expect("授权行应存在");
         assert!(
             (shrunk - t2).abs() < chrono::Duration::milliseconds(1),
             "缩短请求应被忽略，实际 {shrunk}"

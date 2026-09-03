@@ -57,7 +57,10 @@ pub fn build_router(state: state::SharedState) -> axum::Router {
         )
         // ---- 商品：批次/单品/产品 ----
         .route("/api/v1/batches", post(routes::commodity::create_batch))
-        .route("/api/v1/batches/{batch_id}", get(routes::commodity::get_batch))
+        .route(
+            "/api/v1/batches/{batch_id}",
+            get(routes::commodity::get_batch),
+        )
         .route(
             "/api/v1/batches/{batch_id}/split",
             post(routes::commodity::split_batch),
@@ -76,13 +79,22 @@ pub fn build_router(state: state::SharedState) -> axum::Router {
         )
         .route("/api/v1/custody", post(routes::transfer::custody))
         // ---- 隐私：Shielded + Validium ----
-        .route("/api/v1/shielded/transfers", post(routes::shielded::transfer))
+        .route(
+            "/api/v1/shielded/transfers",
+            post(routes::shielded::transfer),
+        )
         .route("/api/v1/shielded/notes/scan", post(routes::shielded::scan))
         .route("/api/v1/shielded/decrypt", post(routes::shielded::decrypt))
-        .route("/api/v1/validium/roots", post(routes::shielded::submit_root))
+        .route(
+            "/api/v1/validium/roots",
+            post(routes::shielded::submit_root),
+        )
         .route("/api/v1/validium/grants", post(routes::shielded::grant))
         // ---- 合规 ----
-        .route("/api/v1/compliance/{subject}", get(routes::compliance::check))
+        .route(
+            "/api/v1/compliance/{subject}",
+            get(routes::compliance::check),
+        )
         .route(
             "/api/v1/compliance/{subject}/required",
             get(routes::compliance::required),
@@ -92,10 +104,7 @@ pub fn build_router(state: state::SharedState) -> axum::Router {
             "/api/v1/policies",
             post(routes::policy::create).get(routes::policy::list),
         )
-        .route(
-            "/api/v1/policies/{id}/{version}",
-            get(routes::policy::get),
-        )
+        .route("/api/v1/policies/{id}/{version}", get(routes::policy::get))
         // ---- 消费者（GET 免签，脱敏聚合视图） ----
         .route("/api/v1/consumer/{subject}", get(routes::consumer::view))
         // ---- 意图（轮询 + 审批） ----
@@ -116,9 +125,11 @@ pub fn build_router(state: state::SharedState) -> axum::Router {
     let router = router
         .route(
             "/api/v1/__test_protected",
-            get(|axum::Extension(AuthedDid(did)): axum::Extension<AuthedDid>| async move {
-                axum::Json(serde_json::json!({ "did": did.as_str() }))
-            }),
+            get(
+                |axum::Extension(AuthedDid(did)): axum::Extension<AuthedDid>| async move {
+                    axum::Json(serde_json::json!({ "did": did.as_str() }))
+                },
+            ),
         )
         .route(
             "/api/v1/consumer/x",
