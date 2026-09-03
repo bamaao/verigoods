@@ -25,7 +25,7 @@ use vg_domain::shared::{Did, DomainError, SubjectRef};
 use vg_domain::credential::VerifiableCredential;
 
 use crate::error::ApiError;
-use crate::mcp::{actor_from_context, McpServer};
+use crate::mcp::{actor_from_context, internal_err, McpServer};
 use crate::routes::begin_tx;
 
 // ---------- 通用助手 ----------
@@ -415,7 +415,7 @@ impl McpServer {
         Parameters(p): Parameters<IdParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let id = vg_domain::shared::BatchId::new(p.id);
-        let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+        let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
         let batch: Batch = match self.state.engine.deps().commodity.find_batch(&mut tx, &id).await {
             Ok(Some(b)) => b,
             Ok(None) => return err_json(ApiError::from(DomainError::NotFound)),
@@ -428,7 +428,7 @@ impl McpServer {
             .commodity
             .lineage_of(&mut tx, &id)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
         let ownership = self
             .state
             .engine
@@ -436,7 +436,7 @@ impl McpServer {
             .ownership
             .get(&mut tx, &SubjectRef::Batch(id.clone()))
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
         let state_str = self
             .state
             .engine
@@ -444,7 +444,7 @@ impl McpServer {
             .lifecycle
             .current_state(&mut tx, &SubjectRef::Batch(id.clone()))
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+            .map_err(internal_err)?
             .map(|s| s.as_str().to_owned())
             .unwrap_or_else(|| batch.state.as_str().to_owned());
         if let Err(e) = tx.commit().await {
@@ -469,7 +469,7 @@ impl McpServer {
         Parameters(p): Parameters<SubjectParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let subject = subject_ref(&p.subject_type, &p.subject_id)?;
-        let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+        let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
         let ownership: Option<OwnershipState> = self
             .state
             .engine
@@ -477,7 +477,7 @@ impl McpServer {
             .ownership
             .get(&mut tx, &subject)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
             return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
         }
@@ -491,7 +491,7 @@ impl McpServer {
         Parameters(p): Parameters<SubjectParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let subject = subject_ref(&p.subject_type, &p.subject_id)?;
-        let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+        let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
         let custody: Option<CustodyState> = self
             .state
             .engine
@@ -499,7 +499,7 @@ impl McpServer {
             .ownership
             .get_custody(&mut tx, &subject)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
             return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
         }
@@ -552,7 +552,7 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<IdParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+        let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
         let intent = self
             .state
             .engine
@@ -560,7 +560,7 @@ impl McpServer {
             .intents
             .get(&mut tx, &vg_domain::shared::IntentId::new(p.id.clone()))
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
             return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
         }
@@ -596,7 +596,7 @@ impl McpServer {
         Parameters(p): Parameters<SubjectParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let subject = subject_ref(&p.subject_type, &p.subject_id)?;
-        let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+        let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
         let records = self
             .state
             .engine
@@ -604,7 +604,7 @@ impl McpServer {
             .ownership
             .history(&mut tx, &subject)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
             return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
         }
@@ -657,7 +657,7 @@ impl McpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let did = Did::parse(&p.did)
             .map_err(|e| ErrorData::invalid_params(format!("did 非法：{e}"), None))?;
-        let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+        let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
         let vcs: Vec<VerifiableCredential> = self
             .state
             .engine
@@ -665,7 +665,7 @@ impl McpServer {
             .credentials
             .list_by_subject(&mut tx, &did)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
             return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
         }
@@ -686,7 +686,7 @@ impl McpServer {
             &subject,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        .map_err(internal_err)?;
         ok_json(&json!({
             "compliant": report.compliant,
             "missing": report.missing.iter().map(|t| t.as_str()).collect::<Vec<_>>(),
@@ -747,7 +747,7 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<IdParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+        let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
         let record = self
             .state
             .engine
@@ -755,7 +755,7 @@ impl McpServer {
             .proofs
             .find(&mut tx, &p.id)
             .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            .map_err(internal_err)?;
         if let Err(e) = tx.commit().await {
             return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
         }
@@ -772,9 +772,4 @@ impl McpServer {
             None => err_json(ApiError::from(DomainError::NotFound)),
         }
     }
-}
-
-/// DomainError → 协议层内部错误（begin_tx 等_transport 类失败）。
-fn internal(e: DomainError) -> ErrorData {
-    ErrorData::internal_error(e.to_string(), None)
 }

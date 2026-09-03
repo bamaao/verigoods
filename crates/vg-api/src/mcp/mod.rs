@@ -52,7 +52,7 @@ use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, RoleServer, ServerHandler};
-use vg_domain::shared::Did;
+use vg_domain::shared::{Did, DomainError};
 
 use crate::state::SharedState;
 #[cfg(not(feature = "mcp-mock-auth"))]
@@ -118,6 +118,18 @@ pub(crate) fn actor_from_context(
     }
 }
 
+/// DomainError → 协议层内部错误（tools / resources 共用）。
+///
+/// Storage 变体脱敏：sqlx 细节（含错误原文）不进 JSON-RPC 响应，
+/// 只落 tracing 日志；其余变体（多为读侧意外）保留 `to_string` 文案。
+pub(crate) fn internal_err(e: DomainError) -> ErrorData {
+    if matches!(e, DomainError::Storage(_)) {
+        tracing::error!(code = "storage", original = %e, "MCP 协议层存储错误（已脱敏）");
+        return ErrorData::internal_error("内部存储错误", None);
+    }
+    ErrorData::internal_error(e.to_string(), None)
+}
+
 /// 构造 `/mcp` 挂载的 streamable-http service（POST/GET/DELETE 由
 /// rmcp 按协议处理；每请求均经 VG-SIG 中间件）。
 pub fn mcp_service(state: SharedState) -> StreamableHttpService<McpServer, LocalSessionManager> {
@@ -174,5 +186,31 @@ impl ServerHandler for McpServer {
         context: rmcp::service::RequestContext<RoleServer>,
     ) -> Result<rmcp::model::ReadResourceResponse, rmcp::ErrorData> {
         self.mcp_read_resource(request, context).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Storage 变体脱敏：输出不含原文、含"内部存储错误"；
+    /// 其余变体保留 Display 原文。
+    #[test]
+    fn internal_err_sanitizes_storage_only() {
+        let e = internal_err(DomainError::Storage(
+            "sqlx: connection refused (postgres://secret@db)".into(),
+        ));
+        let msg = e.message.to_string();
+        assert!(msg.contains("内部存储错误"));
+        assert!(!msg.contains("sqlx"));
+        assert!(!msg.contains("secret"));
+
+        let e = internal_err(DomainError::InvalidTransition {
+            from: "Active".into(),
+            to: "Retired".into(),
+        });
+        let msg = e.message.to_string();
+        assert!(msg.contains("Active"));
+        assert!(msg.contains("Retired"));
     }
 }

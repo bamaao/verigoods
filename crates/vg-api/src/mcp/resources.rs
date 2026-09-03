@@ -22,14 +22,14 @@ use serde_json::json;
 use vg_domain::commodity::{Asset, ProductType};
 use vg_domain::shared::{AssetId, BatchId, DomainError, ProductId, SubjectRef};
 
-use crate::mcp::McpServer;
+use crate::mcp::{internal_err, McpServer};
 use crate::routes::begin_tx;
 
 /// 读事务提交（失败折叠为脱敏 Storage 错误）。
 macro_rules! commit {
     ($tx:expr) => {
         if let Err(e) = $tx.commit().await {
-            return Err(internal(DomainError::Storage(format!("事务提交失败：{e}"))));
+            return Err(internal_err(DomainError::Storage(format!("事务提交失败：{e}"))));
         }
     };
 }
@@ -117,7 +117,7 @@ impl McpServer {
         let value = match kind {
             "batch" => {
                 let bid = BatchId::new(id);
-                let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+                let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
                 let batch = match self
                     .state
                     .engine
@@ -128,7 +128,7 @@ impl McpServer {
                 {
                     Ok(Some(b)) => b,
                     Ok(None) => return Err(not_found(&uri)),
-                    Err(e) => return Err(internal(e)),
+                    Err(e) => return Err(internal_err(e)),
                 };
                 let lineage = self
                     .state
@@ -137,7 +137,7 @@ impl McpServer {
                     .commodity
                     .lineage_of(&mut tx, &bid)
                     .await
-                    .map_err(internal)?;
+                    .map_err(internal_err)?;
                 let ownership = self
                     .state
                     .engine
@@ -145,7 +145,7 @@ impl McpServer {
                     .ownership
                     .get(&mut tx, &SubjectRef::Batch(bid.clone()))
                     .await
-                    .map_err(internal)?;
+                    .map_err(internal_err)?;
                 let state_str = self
                     .state
                     .engine
@@ -153,7 +153,7 @@ impl McpServer {
                     .lifecycle
                     .current_state(&mut tx, &SubjectRef::Batch(bid.clone()))
                     .await
-                    .map_err(internal)?
+                    .map_err(internal_err)?
                     .map(|s| s.as_str().to_owned())
                     .unwrap_or_else(|| batch.state.as_str().to_owned());
                 commit!(tx);
@@ -168,7 +168,7 @@ impl McpServer {
             }
             "asset" => {
                 let aid = AssetId::new(id);
-                let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+                let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
                 let asset: Option<Asset> = self
                     .state
                     .engine
@@ -176,7 +176,7 @@ impl McpServer {
                     .commodity
                     .find_asset(&mut tx, &aid)
                     .await
-                    .map_err(internal)?;
+                    .map_err(internal_err)?;
                 commit!(tx);
                 match asset {
                     Some(a) => serde_json::to_value(&a).map_err(serialize)?,
@@ -185,7 +185,7 @@ impl McpServer {
             }
             "product" => {
                 let pid = ProductId::new(id);
-                let mut tx = begin_tx(&self.state.pool).await.map_err(internal)?;
+                let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
                 let product: Option<ProductType> = self
                     .state
                     .engine
@@ -193,7 +193,7 @@ impl McpServer {
                     .commodity
                     .find_product(&mut tx, &pid)
                     .await
-                    .map_err(internal)?;
+                    .map_err(internal_err)?;
                 commit!(tx);
                 match product {
                     Some(p) => serde_json::to_value(&p).map_err(serialize)?,
@@ -210,15 +210,6 @@ impl McpServer {
         let text = serde_json::to_string_pretty(&value).map_err(serialize)?;
         Ok(ResourceContents::text(text, uri).with_mime_type("application/json"))
     }
-}
-
-/// DomainError → 协议层错误（Storage 脱敏，不泄 DSN/SQL 细节）。
-fn internal(e: DomainError) -> ErrorData {
-    if matches!(e, DomainError::Storage(_)) {
-        tracing::error!(code = "storage", original = %e, "MCP 资源读取存储错误（已脱敏）");
-        return ErrorData::internal_error("内部存储错误", None);
-    }
-    ErrorData::internal_error(e.to_string(), None)
 }
 
 /// 资源不存在：按新版协议口径映射 invalid_params（旧口径由 SDK 统一改写）。
