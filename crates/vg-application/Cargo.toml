@@ -20,4 +20,5 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+dotenvy = { workspace = true }
 vg-infra-zk = { path = "../vg-infra-zk" }
