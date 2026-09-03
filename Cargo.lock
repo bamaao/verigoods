@@ -5511,6 +5511,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dotenvy",
  "hex",
  "k256",
  "serde",
