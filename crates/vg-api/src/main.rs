@@ -47,6 +47,32 @@ async fn main() {
             panic!("VG_PROVER=transparent 需以 `--features transparent` 编译")
         }
     };
+    // 账本端口选择（Task 26）：
+    // - feature chain-alloy 开启 且 CHAIN_RPC_URL 非空 → AlloyLedger（真实链）；
+    // - 否则 → InProcessLedger（默认，本地模拟账本）。
+    // 注意：AlloyLedger 建连失败直接 panic（配置错误的链端点不应静默回落，
+    // 否则锚定悄悄变本地账本、语义不一致）。
+    #[cfg(feature = "chain-alloy")]
+    let ledger: Arc<dyn vg_domain::ports::LedgerPort> = {
+        match std::env::var("CHAIN_RPC_URL") {
+            Ok(url) if !url.is_empty() => {
+                tracing::info!(%url, "CHAIN_RPC_URL 已设置：装配 alloy 链账本（AlloyLedger）");
+                let cfg = vg_infra_chain::provider::ChainConfig::from_env()
+                    .unwrap_or_else(|e| panic!("alloy 链账本装配失败：{e}"));
+                cfg.connect()
+                    .await
+                    .unwrap_or_else(|e| panic!("alloy 链账本装配失败：{e}"))
+            }
+            _ => {
+                tracing::info!("CHAIN_RPC_URL 未设置：装配 InProcessLedger（默认本地账本）");
+                Arc::new(vg_infra_pg::InProcessLedger::new(pool.clone()))
+            }
+        }
+    };
+    #[cfg(not(feature = "chain-alloy"))]
+    let ledger: Arc<dyn vg_domain::ports::LedgerPort> =
+        Arc::new(vg_infra_pg::InProcessLedger::new(pool.clone()));
+
     let deps = AppDeps {
         pool: pool.clone(),
         identity: Arc::new(PgIdentityRepo),
@@ -60,7 +86,7 @@ async fn main() {
         audit: Arc::new(PgAuditWriter),
         outbox: Arc::new(PgOutbox),
         approvals: Arc::new(PgApprovalsStore),
-        ledger: Arc::new(vg_infra_pg::InProcessLedger::new(pool.clone())),
+        ledger,
         prover,
         hasher: Arc::new(vg_infra_crypto::PoseidonNoteHasher),
     };

@@ -1,0 +1,31 @@
+[package]
+name = "vg-infra-chain"
+version = "0.1.0"
+edition = "2021"
+description = "VeriGoods 链层适配器：alloy LedgerPort 实现（feature-gated，默认零 alloy 编译成本）"
+
+[dependencies]
+vg-domain = { path = "../vg-domain" }
+
+# 以下依赖只在 chain-alloy 代码中使用，全部与 feature 绑定——
+# 默认配置（仅编译 lib.rs 的 pairing 纯状态机）零额外编译成本。
+alloy = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[features]
+default = []
+# 真实链层（Polygon CDK）：启用 alloy 依赖与全部适配器代码。
+chain-alloy = [
+    "dep:alloy",
+    "dep:async-trait",
+    "dep:chrono",
+    "dep:hex",
+    "dep:tracing",
+]
+
+[dev-dependencies]
+# ignored 集成测试的 async 驱动（需真实 CDK RPC 才运行）
+tokio = { workspace = true }

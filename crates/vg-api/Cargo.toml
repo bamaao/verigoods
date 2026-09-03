@@ -11,6 +11,8 @@ vg-application = { path = "../vg-application" }
 vg-infra-crypto = { path = "../vg-infra-crypto" }
 vg-infra-pg = { path = "../vg-infra-pg" }
 vg-infra-zk = { path = "../vg-infra-zk" }
+# alloy 链适配器（可选：CHAIN_RPC_URL 有值时 bootstrap 装配 AlloyLedger）
+vg-infra-chain = { path = "../vg-infra-chain", optional = true }
 axum = { workspace = true }
 rmcp = { workspace = true }
 http = { workspace = true }
@@ -31,6 +33,9 @@ tracing-subscriber = { workspace = true }
 # transparent 模式：用 TransparentProver 替代 Plonky ProverDispatcher
 # （复用 vg-infra-zk 的 test-util feature，默认关闭）。
 transparent = ["vg-infra-zk/test-util"]
+# alloy 链层（Polygon CDK）：透传 vg-infra-chain 同名 feature——
+# 开启后 bootstrap 在 CHAIN_RPC_URL 非空时装配 AlloyLedger（否则 InProcessLedger）
+chain-alloy = ["vg-infra-chain/chain-alloy"]
 # ⚠⚠⚠ 仅测试用：MCP 工具 actor 直通固定测试 DID ⚠⚠⚠
 # 开启此 feature 后 MCP 工具不再要求 VG-SIG 鉴权注入的 AuthedDid，
 # actor 一律使用固定测试 DID（供 in-process rmcp 客户端

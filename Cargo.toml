@@ -57,3 +57,13 @@ sqlx = { version = "0.8", default-features = false, features = [
     "macros",
     "migrate",
 ] }
+# alloy：Polygon CDK 链层适配器（Task 26，vg-infra-chain 的可选依赖，
+# feature chain-alloy 门控——默认配置零 alloy 编译成本）。
+# 2.4.1（cargo search 确认最新稳定）；features 最小化：
+# essentials = contract + provider-http + rpc-types + signer-local
+alloy = { version = "2.4.1", default-features = false, features = [
+    "std",
+    "essentials",
+    "reqwest",
+    "reqwest-rustls-tls",
+] }
