@@ -298,6 +298,56 @@ async fn prompts_list_and_render(pool: sqlx::PgPool) {
     assert!(text.contains("检出致病菌"), "应渲染 reason 占位：{text}");
 }
 
+/// 负面（授权口径）：无 CreateBatch 能力的 DID 调 create_batch——引擎契约
+/// 是**业务拒绝**（`IntentStatus::Rejected` 的 200 结果，与 REST 同口径，
+/// 见 intent_engine 测试"无 Capability 是业务拒绝"），不是工具错误：
+/// 断言 status=rejected 且 rejection 含"未授权"字样。
+#[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+async fn create_batch_without_capability_is_business_rejection(pool: sqlx::PgPool) {
+    // 只落 DID 文档、不授予任何能力
+    seed_mock_identity(&pool, &[]).await;
+    seed_product(&pool, "pd-pork").await;
+    let client = in_process(test_state(pool)).await;
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("mcp_create_batch").with_arguments(args(json!({
+                "batch_id": "bt-denied-1",
+                "product_id": "pd-pork",
+                "quantity": 1,
+                "unit": "kg",
+            }))),
+        )
+        .await
+        .unwrap();
+    assert_ne!(result.is_error, Some(true), "业务拒绝不是协议/工具错误：{result:?}");
+    let v = tool_json(&result);
+    assert_eq!(v["status"], "rejected", "无能力应业务拒绝：{v}");
+    let rejection = v["rejection"].as_str().unwrap_or_default();
+    assert!(rejection.contains("未授权"), "拒绝原因应指向能力缺失：{v}");
+}
+
+/// 负面（工具错误口径）：业务 Err（非法 view_priv）→ `CallToolResult`
+/// is_error 且 content 为 `{"code","message"}`（code 非空）——
+/// 覆盖 scan_shielded_notes 的 AppError → err_json 修复路径。
+#[sqlx::test(migrations = "../vg-infra-pg/migrations")]
+async fn scan_notes_invalid_key_is_tool_error_with_code(pool: sqlx::PgPool) {
+    let client = in_process(test_state(pool)).await;
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("mcp_scan_shielded_notes").with_arguments(args(json!({
+                "view_priv": "not-hex-at-all",
+                "spend_pub": "02".repeat(33),
+            }))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.is_error, Some(true), "非法入参应返回工具错误：{result:?}");
+    let v = tool_json(&result);
+    let code = v["code"].as_str().unwrap_or_default();
+    assert!(!code.is_empty(), "错误体应含非空 code：{v}");
+}
+
 /// 鉴权桥（HTTP 层）：无签名 POST /mcp → 401（VG-SIG 中间件覆盖）。
 #[sqlx::test(migrations = "../vg-infra-pg/migrations")]
 async fn unsigned_mcp_post_is_401(pool: sqlx::PgPool) {

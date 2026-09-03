@@ -130,6 +130,19 @@ pub(crate) fn internal_err(e: DomainError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
+/// 读事务提交（失败折叠为脱敏 Storage 错误 → 协议层内部错误）。
+///
+/// MCP 读侧共用宏（resources / tools 均可用；tools 的业务读工具
+/// 自行经 `err_json` 走业务错误口径，不受此宏约束）。
+macro_rules! commit {
+    ($tx:expr) => {
+        if let Err(e) = $tx.commit().await {
+            return Err(internal_err(DomainError::Storage(format!("事务提交失败：{e}"))));
+        }
+    };
+}
+pub(crate) use commit;
+
 /// 构造 `/mcp` 挂载的 streamable-http service（POST/GET/DELETE 由
 /// rmcp 按协议处理；每请求均经 VG-SIG 中间件）。
 pub fn mcp_service(state: SharedState) -> StreamableHttpService<McpServer, LocalSessionManager> {

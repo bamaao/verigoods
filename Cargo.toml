@@ -39,6 +39,9 @@ axum = "0.8"
 # 监管解密端点的 ExtraData 密文 base64 编解码（Task 24 REST 层）
 base64 = "0.22"
 # MCP 官方 Rust SDK（Task 25：server + streamable-http 服务端 transport）
+# ⚠ 鉴权桥（vg-api/src/mcp/mod.rs actor_from_context）依赖 rmcp streamable-http
+#   将 http::request::Parts（含 AuthedDid extension）透传进 RequestContext.extensions
+#   的行为——rmcp 升级（含 3.2.x 补丁版）须重测 mcp_scenario + unsigned_mcp_post_is_401
 rmcp = { version = "3.2", features = ["server", "macros", "transport-streamable-http-server"] }
 http = "1"
 schemars = "1.0"

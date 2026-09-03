@@ -18,7 +18,6 @@ use rmcp::{tool, tool_router};
 use rmcp::{ErrorData, RoleServer};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use vg_domain::commodity::Batch;
 use vg_domain::intent::IntentAction;
 use vg_domain::ownership::{CustodyState, OwnershipState};
 use vg_domain::shared::{Did, DomainError, SubjectRef};
@@ -416,48 +415,21 @@ impl McpServer {
     ) -> Result<CallToolResult, ErrorData> {
         let id = vg_domain::shared::BatchId::new(p.id);
         let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
-        let batch: Batch = match self.state.engine.deps().commodity.find_batch(&mut tx, &id).await {
-            Ok(Some(b)) => b,
-            Ok(None) => return err_json(ApiError::from(DomainError::NotFound)),
+        // 聚合组装走 REST 同款唯一口径（一处化）
+        let value = match crate::routes::commodity::batch_aggregate(
+            self.state.engine.deps(),
+            &mut tx,
+            &id,
+        )
+        .await
+        {
+            Ok(v) => v,
             Err(e) => return err_json(ApiError::from(e)),
         };
-        let lineage = self
-            .state
-            .engine
-            .deps()
-            .commodity
-            .lineage_of(&mut tx, &id)
-            .await
-            .map_err(internal_err)?;
-        let ownership = self
-            .state
-            .engine
-            .deps()
-            .ownership
-            .get(&mut tx, &SubjectRef::Batch(id.clone()))
-            .await
-            .map_err(internal_err)?;
-        let state_str = self
-            .state
-            .engine
-            .deps()
-            .lifecycle
-            .current_state(&mut tx, &SubjectRef::Batch(id.clone()))
-            .await
-            .map_err(internal_err)?
-            .map(|s| s.as_str().to_owned())
-            .unwrap_or_else(|| batch.state.as_str().to_owned());
         if let Err(e) = tx.commit().await {
             return err_json(ApiError::from(DomainError::Storage(format!("事务提交失败：{e}"))));
         }
-        ok_json(&json!({
-            "batch": batch,
-            "lineage": lineage,
-            "owner": ownership.as_ref().map(|o| o.owner.clone()),
-            "transfer_count": ownership.as_ref().map(|o| o.transfer_count).unwrap_or(0),
-            "c2c_count": ownership.as_ref().map(|o| o.c2c_count).unwrap_or(0),
-            "state": state_str,
-        }))
+        ok_json(&value)
     }
 
     // ===== ownership =====
@@ -705,7 +677,7 @@ impl McpServer {
             &subject,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        .map_err(internal_err)?;
         let list: Vec<&str> = required.iter().map(|t| t.as_str()).collect();
         ok_json(&list)
     }
@@ -718,13 +690,18 @@ impl McpServer {
         &self,
         Parameters(p): Parameters<ScanNotesParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let notes = vg_application::services::shielded::scan_notes(
+        // 业务失败（AppError）走业务 CallToolResult::error（{"code","message"}，
+        // Storage 脱敏同 REST），不直传协议层 internal_error
+        let notes = match vg_application::services::shielded::scan_notes(
             self.state.engine.deps(),
             &p.view_priv,
             &p.spend_pub,
         )
         .await
-        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        {
+            Ok(n) => n,
+            Err(e) => return err_json(ApiError::from(e)),
+        };
         // 与 REST 同款：ScannedNote 无 Serialize，显式组装（不透出 spend 私钥）
         let items: Vec<Value> = notes
             .iter()

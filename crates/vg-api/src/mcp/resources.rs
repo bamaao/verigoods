@@ -18,21 +18,11 @@ use rmcp::model::{
 use rmcp::model::PaginatedRequestParams;
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer};
-use serde_json::json;
 use vg_domain::commodity::{Asset, ProductType};
-use vg_domain::shared::{AssetId, BatchId, DomainError, ProductId, SubjectRef};
+use vg_domain::shared::{AssetId, BatchId, DomainError, ProductId};
 
-use crate::mcp::{internal_err, McpServer};
+use crate::mcp::{commit, internal_err, McpServer};
 use crate::routes::begin_tx;
-
-/// 读事务提交（失败折叠为脱敏 Storage 错误）。
-macro_rules! commit {
-    ($tx:expr) => {
-        if let Err(e) = $tx.commit().await {
-            return Err(internal_err(DomainError::Storage(format!("事务提交失败：{e}"))));
-        }
-    };
-}
 
 impl McpServer {
     /// 三类资源模板（静态）。
@@ -118,53 +108,20 @@ impl McpServer {
             "batch" => {
                 let bid = BatchId::new(id);
                 let mut tx = begin_tx(&self.state.pool).await.map_err(internal_err)?;
-                let batch = match self
-                    .state
-                    .engine
-                    .deps()
-                    .commodity
-                    .find_batch(&mut tx, &bid)
-                    .await
+                // 聚合组装走 REST 同款唯一口径（一处化）
+                let value = match crate::routes::commodity::batch_aggregate(
+                    self.state.engine.deps(),
+                    &mut tx,
+                    &bid,
+                )
+                .await
                 {
-                    Ok(Some(b)) => b,
-                    Ok(None) => return Err(not_found(&uri)),
+                    Ok(v) => v,
+                    Err(DomainError::NotFound) => return Err(not_found(&uri)),
                     Err(e) => return Err(internal_err(e)),
                 };
-                let lineage = self
-                    .state
-                    .engine
-                    .deps()
-                    .commodity
-                    .lineage_of(&mut tx, &bid)
-                    .await
-                    .map_err(internal_err)?;
-                let ownership = self
-                    .state
-                    .engine
-                    .deps()
-                    .ownership
-                    .get(&mut tx, &SubjectRef::Batch(bid.clone()))
-                    .await
-                    .map_err(internal_err)?;
-                let state_str = self
-                    .state
-                    .engine
-                    .deps()
-                    .lifecycle
-                    .current_state(&mut tx, &SubjectRef::Batch(bid.clone()))
-                    .await
-                    .map_err(internal_err)?
-                    .map(|s| s.as_str().to_owned())
-                    .unwrap_or_else(|| batch.state.as_str().to_owned());
                 commit!(tx);
-                json!({
-                    "batch": batch,
-                    "lineage": lineage,
-                    "owner": ownership.as_ref().map(|o| o.owner.clone()),
-                    "transfer_count": ownership.as_ref().map(|o| o.transfer_count).unwrap_or(0),
-                    "c2c_count": ownership.as_ref().map(|o| o.c2c_count).unwrap_or(0),
-                    "state": state_str,
-                })
+                value
             }
             "asset" => {
                 let aid = AssetId::new(id);

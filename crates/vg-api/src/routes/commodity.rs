@@ -28,6 +28,8 @@ use vg_domain::commodity::{Batch, LineageEdge, ProductType};
 use vg_domain::intent::IntentAction;
 use vg_domain::shared::{BatchId, DomainError, Hash32, ProductId, SubjectRef};
 
+use vg_application::{AppDeps, PgTx};
+
 use crate::error::ApiError;
 use crate::middleware::auth::AuthedDid;
 use crate::routes::{begin_tx, run_intent, split_meta};
@@ -133,6 +135,45 @@ pub async fn create_item(
     .await
 }
 
+/// 批次聚合视图组装（唯一口径：REST `GET /batches/{id}`、MCP
+/// `mcp_get_batch` 工具与 `commodity://batch/{id}` 资源三方共用）。
+///
+/// 在调用方提供的读事务内完成全部读取并返回聚合 JSON；事务的
+/// commit 由调用方负责（保持各自错误口径）。
+pub(crate) async fn batch_aggregate(
+    deps: &AppDeps,
+    tx: &mut PgTx,
+    id: &BatchId,
+) -> Result<Value, DomainError> {
+    let batch: Batch = deps
+        .commodity
+        .find_batch(tx, id)
+        .await?
+        .ok_or(DomainError::NotFound)?;
+    let lineage: Vec<LineageEdge> = deps.commodity.lineage_of(tx, id).await?;
+    let ownership = deps
+        .ownership
+        .get(tx, &SubjectRef::Batch(id.clone()))
+        .await?;
+    let state_str = match deps
+        .lifecycle
+        .current_state(tx, &SubjectRef::Batch(id.clone()))
+        .await?
+    {
+        Some(s) => s.as_str().to_owned(),
+        // 无事件时回读聚合档案（与 services::compliance::current_state 同源口径）
+        None => batch.state.as_str().to_owned(),
+    };
+    Ok(json!({
+        "batch": batch,
+        "lineage": lineage,
+        "owner": ownership.as_ref().map(|o| o.owner.clone()),
+        "transfer_count": ownership.as_ref().map(|o| o.transfer_count).unwrap_or(0),
+        "c2c_count": ownership.as_ref().map(|o| o.c2c_count).unwrap_or(0),
+        "state": state_str,
+    }))
+}
+
 /// 批次聚合视图。
 pub async fn get_batch(
     State(state): State<SharedState>,
@@ -140,47 +181,11 @@ pub async fn get_batch(
 ) -> Result<Json<Value>, ApiError> {
     let id = BatchId::new(batch_id);
     let mut tx = begin_tx(&state.pool).await?;
-    let batch: Batch = state
-        .engine
-        .deps()
-        .commodity
-        .find_batch(&mut tx, &id)
-        .await?
-        .ok_or(DomainError::NotFound)?;
-    let lineage: Vec<LineageEdge> = state
-        .engine
-        .deps()
-        .commodity
-        .lineage_of(&mut tx, &id)
-        .await?;
-    let ownership = state
-        .engine
-        .deps()
-        .ownership
-        .get(&mut tx, &vg_domain::shared::SubjectRef::Batch(id.clone()))
-        .await?;
-    let state_str = match state
-        .engine
-        .deps()
-        .lifecycle
-        .current_state(&mut tx, &vg_domain::shared::SubjectRef::Batch(id.clone()))
-        .await?
-    {
-        Some(s) => s.as_str().to_owned(),
-        // 无事件时回读聚合档案（与 services::compliance::current_state 同源口径）
-        None => batch.state.as_str().to_owned(),
-    };
+    let value = batch_aggregate(state.engine.deps(), &mut tx, &id).await?;
     tx.commit()
         .await
         .map_err(|e| DomainError::Storage(format!("事务提交失败：{e}")))?;
-    Ok(Json(json!({
-        "batch": batch,
-        "lineage": lineage,
-        "owner": ownership.as_ref().map(|o| o.owner.clone()),
-        "transfer_count": ownership.as_ref().map(|o| o.transfer_count).unwrap_or(0),
-        "c2c_count": ownership.as_ref().map(|o| o.c2c_count).unwrap_or(0),
-        "state": state_str,
-    })))
+    Ok(Json(value))
 }
 
 /// 产品建档（引导直写，无 intent action）。
