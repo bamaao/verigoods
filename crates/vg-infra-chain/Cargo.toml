@@ -9,6 +9,14 @@ vg-domain = { path = "../vg-domain" }
 
 # 以下依赖只在 chain-alloy 代码中使用，全部与 feature 绑定——
 # 默认配置（仅编译 lib.rs 的 pairing 纯状态机）零额外编译成本。
+#
+# alloy 升级重验清单（升 workspace alloy 版本后逐项过）：
+# 1. `cargo clippy -p vg-infra-chain --features chain-alloy --all-targets -- -D warnings`；
+# 2. `cargo test -p vg-infra-chain --features chain-alloy -- --ignored`
+#    （需 kurtosis-cdk RPC 与全新部署合约）；
+# 3. 检查 `get_receipt()` API 形状（PendingTransactionBuilder 的返回/
+#    错误类型跨 minor 版本常变，anchor.rs 逐字段手取 receipt 以避具名，
+#    但方法名/链式形态本身可能漂移）。
 alloy = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }

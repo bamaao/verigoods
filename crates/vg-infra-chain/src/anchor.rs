@@ -21,6 +21,15 @@
 //! - 双花（nf 已花 / commitment 已存）：合约 require revert → 交易上链失败
 //!   → `DomainError::Storage`（与 InProcessLedger 幂等返回旧回执的行为
 //!   **不同**——链侧如实暴露冲突，重试/幂等归上层，见 lib.rs 错误语义）。
+//!
+//! ## 并发契约（重要）
+//!
+//! **`anchor` 调用必须串行**：单 IntentEngine 事务内的顺序调用是当前
+//! 唯一调用形态。内部 `Mutex` 只在配对缓冲状态转移的瞬间持有，网络
+//! I/O 在锁外进行——两个并发 `anchor(EncryptedExtra)` 会在 I/O 窗口
+//! 交错，把错误状态误报为"顺序契约破坏"。并发调用行为未定义；
+//! Phase2 重试引擎（后台 try_anchor 并发化）接入前，须改造为
+//! in-flight 标记或全路径持锁。
 
 use std::sync::Mutex;
 
@@ -42,6 +51,10 @@ use crate::pairing::{AnchorPlan, PairingBuffer};
 /// 其返回值已擦除为 `Arc<dyn LedgerPort>`，本泛型只为可测/可注入）。
 ///
 /// 字段 `pairing` 为 N→C→E 顺序契约的配对缓冲（见 lib.rs 大字契约）。
+///
+/// **并发契约：`anchor` 必须串行调用**（锁只在状态转移瞬间持有，I/O
+/// 窗口无互斥——并发交错的 extra 会被误判为契约破坏，行为未定义；
+/// Phase2 重试引擎接入前须改为 in-flight 标记，见模块 doc）。
 pub struct AlloyLedger<P> {
     /// 带本地私钥钱包的 HTTP provider（Polygon CDK L2 RPC）。
     provider: P,
@@ -255,6 +268,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "需 Polygon CDK(kurtosis-cdk) RPC"]
     async fn double_spend_reverts_as_storage_error() {
+        // 非幂等、不可重跑：同 nf 第二次上链必然 revert，重跑旧部署必炸；
+        // 重跑前须部署全新合约（重设 SHIELDED_REGISTRY_ADDR 等环境变量）。
         let ledger = connect().await;
         let nf = Hash32::keccak(b"it-nf-2");
         let c1 = Hash32::keccak(b"it-c-2a");

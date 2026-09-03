@@ -72,6 +72,11 @@ pub mod pairing {
 
     /// N→C→E 三连锚的配对缓冲（`Mutex` 包裹后嵌入 AlloyLedger）。
     ///
+    /// **并发契约**：本状态机假定 `anchor` 调用串行（单 IntentEngine
+    /// 事务内顺序调用是当前唯一形态）；外层 `Mutex` 只互斥状态转移瞬间，
+    /// I/O 窗口无互斥——并发调用行为未定义，Phase2 重试引擎接入前须改
+    /// 为 in-flight 标记（见 anchor.rs 模块 doc）。
+    ///
     /// 状态转移（顺序契约 N→C→E；异常序容错但不产生半提交）：
     /// - `Nullifier(nf)`：暂存 nf（覆盖旧值），不出计划；
     /// - `Commitment(c)`：暂存 c，不出计划；
@@ -106,21 +111,21 @@ pub mod pairing {
         /// 仅在成功产出计划的分支消耗缓冲；错误分支保留现场（nf 继续等待
         /// 后续 C，下一轮 C→E 仍可配对）。
         pub fn on_extra(&mut self, extra: Vec<u8>) -> Result<AnchorPlan, DomainError> {
-            match (self.nf, self.commitment) {
-                (Some(_), Some(_)) => Ok(AnchorPlan::CommitAndSpend {
-                    nf: self.nf.take().expect("上面已判 Some"),
-                    commitment: self.commitment.take().expect("上面已判 Some"),
+            match (self.nf.take(), self.commitment.take()) {
+                (Some(nf), Some(commitment)) => Ok(AnchorPlan::CommitAndSpend {
+                    nf,
+                    commitment,
                     extra,
                 }),
-                (None, Some(_)) => Ok(AnchorPlan::Commit {
-                    commitment: self.commitment.take().expect("上面已判 Some"),
-                    extra,
-                }),
-                // 有 nf 无 c：extra 无从归属，报错；nf 保留等待后续 C。
-                (Some(_), None) => Err(DomainError::Storage(
-                    "EncryptedExtra 到达时仅有 pending nullifier 而无 commitment（顺序契约 N→C→E 被破坏）"
-                        .into(),
-                )),
+                (None, Some(commitment)) => Ok(AnchorPlan::Commit { commitment, extra }),
+                // 有 nf 无 c：extra 无从归属，报错；nf 放回保留等待后续 C。
+                (Some(nf), None) => {
+                    self.nf = Some(nf);
+                    Err(DomainError::Storage(
+                        "EncryptedExtra 到达时仅有 pending nullifier 而无 commitment（顺序契约 N→C→E 被破坏）"
+                            .into(),
+                    ))
+                }
                 (None, None) => Err(DomainError::Storage(
                     "EncryptedExtra 无可归属的 commitment/nullifier（顺序契约 N→C→E 被破坏）"
                         .into(),

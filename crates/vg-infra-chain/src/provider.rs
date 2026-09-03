@@ -1,5 +1,6 @@
 //! 链连接配置与 provider 构造（Task 26，feature `chain-alloy`）。
 
+use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -12,7 +13,9 @@ use vg_domain::shared::DomainError;
 use crate::anchor::AlloyLedger;
 
 /// 链连接配置（Polygon CDK / 任意 EVM 兼容 L2）。
-#[derive(Debug, Clone)]
+///
+/// 不派生 `Clone`：唯一用途是 [`ChainConfig::connect`]（按值消费建连），
+/// 克隆配置意味着克隆私钥、扩大明文暴露面。
 pub struct ChainConfig {
     /// L2 RPC 端点（如 kurtosis-cdk 输出的 zkevm-node RPC）。
     pub rpc_url: String,
@@ -25,6 +28,20 @@ pub struct ChainConfig {
     pub state_anchor: Address,
     /// 期望链 ID（连接后校验，防配错网络）。
     pub chain_id: u64,
+}
+
+/// 手写 Debug：`operator_key` 为明文私钥，**脱敏显示 `"***"`**——
+/// 防止配置经 `tracing`/`dbg!`/错误上下文意外落日志。
+impl fmt::Debug for ChainConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChainConfig")
+            .field("rpc_url", &self.rpc_url)
+            .field("operator_key", &"***")
+            .field("shielded_registry", &self.shielded_registry)
+            .field("state_anchor", &self.state_anchor)
+            .field("chain_id", &self.chain_id)
+            .finish()
+    }
 }
 
 impl ChainConfig {
