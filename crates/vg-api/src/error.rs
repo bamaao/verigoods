@@ -57,7 +57,9 @@ impl ApiError {
     }
 
     /// snake 码（作为响应体 `code`，供客户端程序化分诊）。
-    fn code(&self) -> &'static str {
+    ///
+    /// `pub(crate)`：MCP 层（Task 25）错误体复用同一 snake 码口径。
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::IntentNotFound(_) => "intent_not_found",
             Self::Domain(e) => match e {
@@ -91,21 +93,33 @@ impl From<AppError> for ApiError {
     }
 }
 
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        let message = match &self {
+impl ApiError {
+    /// 面向调用方的安全文案（Storage 脱敏），REST 与 MCP 出口共用。
+    ///
+    /// Storage 错误的原始消息可能携带 DSN/SQL 细节等敏感信息：
+    /// 响应体一律脱敏为通用文案，原始消息仅进服务端日志。
+    pub(crate) fn message(&self) -> String {
+        match self {
             Self::IntentNotFound(id) => format!("意图未找到：{id}"),
-            // Storage 错误的原始消息可能携带 DSN/SQL 细节等敏感信息：
-            // 响应体一律脱敏为通用文案，原始消息仅进服务端日志
             Self::Domain(DomainError::Storage(original)) => {
                 tracing::error!(code = "storage", original = %original, "内部存储错误（响应体已脱敏）");
                 "内部存储错误".to_owned()
             }
             Self::Domain(e) => e.to_string(),
-        };
+        }
+    }
+
+    /// 错误体 JSON：`{"code": <snake 码>, "message": <安全文案>}`。
+    pub(crate) fn to_error_json(&self) -> serde_json::Value {
+        json!({ "code": self.code(), "message": self.message() })
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
         (
             self.status(),
-            Json(json!({ "code": self.code(), "message": message })),
+            Json(self.to_error_json()),
         )
             .into_response()
     }

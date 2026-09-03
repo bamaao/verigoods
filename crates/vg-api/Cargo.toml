@@ -12,6 +12,9 @@ vg-infra-crypto = { path = "../vg-infra-crypto" }
 vg-infra-pg = { path = "../vg-infra-pg" }
 vg-infra-zk = { path = "../vg-infra-zk" }
 axum = { workspace = true }
+rmcp = { workspace = true }
+http = { workspace = true }
+schemars = { workspace = true }
 chrono = { workspace = true }
 dotenvy = { workspace = true }
 hex = { workspace = true }
@@ -28,6 +31,14 @@ tracing-subscriber = { workspace = true }
 # transparent 模式：用 TransparentProver 替代 Plonky ProverDispatcher
 # （复用 vg-infra-zk 的 test-util feature，默认关闭）。
 transparent = ["vg-infra-zk/test-util"]
+# ⚠⚠⚠ 仅测试用：MCP 工具 actor 直通固定测试 DID ⚠⚠⚠
+# 开启此 feature 后 MCP 工具不再要求 VG-SIG 鉴权注入的 AuthedDid，
+# actor 一律使用固定测试 DID（供 in-process rmcp 客户端
+# 集成测试走通意图管道）。**生产构建严禁开启**（工具调用将全部记在
+# 固定测试主体名下）。
+mcp-mock-auth = []
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
+# MCP 测试客户端（in-process duplex transport）需要 rmcp client 侧
+rmcp = { workspace = true, features = ["client"] }

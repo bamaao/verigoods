@@ -6,7 +6,8 @@
 //! - [`error`]：领域错误 → HTTP 状态码统一映射；
 //! - [`extract`]：`AppJson` 请求体提取器（JSON 解析失败 → 统一 400 错误体）；
 //! - [`middleware`]：VG-SIG 请求签名鉴权中间件；
-//! - [`routes`]：路由（`/health` + Task 24 业务路由全集）。
+//! - [`routes`]：路由（`/health` + Task 24 业务路由全集）；
+//! - [`mcp`]：MCP 服务（Task 25：rmcp 工具/资源/提示词，挂 `/mcp`）。
 //!
 //! bin（`src/main.rs`）引导顺序：dotenvy（经 [`config::Config::from_env`]）
 //! → tracing → PgPool connect + migrate → `AppDeps` 装配 → `IntentEngine`
@@ -15,6 +16,7 @@
 pub mod config;
 pub mod error;
 pub mod extract;
+pub mod mcp;
 pub mod middleware;
 pub mod routes;
 pub mod state;
@@ -101,7 +103,11 @@ pub fn build_router(state: state::SharedState) -> axum::Router {
         .route(
             "/api/v1/intents/{id}/approve",
             post(routes::intent::approve),
-        );
+        )
+        // ---- MCP（Task 25）：rmcp streamable-http，POST/GET/DELETE 按协议；
+        // VG-SIG 中间件覆盖（每请求验签——streamable-http 每请求带头，
+        // "连接级"签名在此语义下等效；工具 actor 绑定当次请求签名者） ----
+        .nest_service("/mcp", mcp::mcp_service(state.clone()));
 
     // 测试保护路由（只随 `cargo test` 编译，不进生产二进制）：
     // - `__test_protected`：回显 AuthedDid，验证签名注入；

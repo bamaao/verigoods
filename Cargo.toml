@@ -38,6 +38,10 @@ tracing = "0.1"
 axum = "0.8"
 # 监管解密端点的 ExtraData 密文 base64 编解码（Task 24 REST 层）
 base64 = "0.22"
+# MCP 官方 Rust SDK（Task 25：server + streamable-http 服务端 transport）
+rmcp = { version = "3.2", features = ["server", "macros", "transport-streamable-http-server"] }
+http = "1"
+schemars = "1.0"
 dotenvy = "0.15"
 tower = { version = "0.5", features = ["util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
