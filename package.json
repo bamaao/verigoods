@@ -1,0 +1,9 @@
+{
+  "name": "verigoods-contracts-deps",
+  "version": "0.1.0",
+  "private": true,
+  "description": "仅为编辑器（VS Code Solidity 插件）解析 contracts-ext 的 OpenZeppelin 导入；合约编译/部署在 WSL kurtosis-cdk 环境进行，本仓不本地编译。",
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.1.0"
+  }
+}
